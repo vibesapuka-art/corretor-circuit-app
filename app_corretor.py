@@ -1,13 +1,22 @@
 import pandas as pd
 import re
 from rapidfuzz import process, fuzz
-import io # Para manipulação de arquivos na memória
-import streamlit as st # Biblioteca para criar a interface web
+import io
+import streamlit as st
+import os
 
-# --- Configurações Principais ---
+# --- Configurações da Página ---
+st.set_page_config(
+    page_title="Corretor de Endereços Circuit",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Configurações Principais (Colunas) ---
 COLUNA_ENDERECO = 'Destination Address'
 COLUNA_SEQUENCE = 'Sequence'
-LIMITE_SIMILARIDADE = 90 
+COLUNA_LATITUDE = 'Latitude'
+COLUNA_LONGITUDE = 'Longitude'
 
 
 def limpar_endereco(endereco):
@@ -21,11 +30,19 @@ def limpar_endereco(endereco):
     return endereco
 
 
-@st.cache_data # Cache para otimizar a execução de funções pesadas
-def processar_e_corrigir_dados(df_entrada):
+@st.cache_data
+def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
-    Função principal que aplica toda a lógica de correção, agrupamento e formatação.
+    Aplica toda a lógica de correção, agrupamento e formatação, retornando o DF do Circuit
+    e o DF simplificado para Impressão.
     """
+    # Verifica se as colunas essenciais existem
+    colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
+    for col in colunas_essenciais:
+        if col not in df_entrada.columns:
+            st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
+            return None, None 
+
     df = df_entrada.copy()
 
     # 1. Limpeza e Normalização
@@ -34,7 +51,9 @@ def processar_e_corrigir_dados(df_entrada):
     mapa_correcao = {}
     
     # 2. Fuzzy Matching e Geração do Mapa de Correção
-    for end_principal in enderecos_unicos:
+    progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching...")
+    total_unicos = len(enderecos_unicos)
+    for i, end_principal in enumerate(enderecos_unicos):
         if end_principal not in mapa_correcao:
             matches = process.extract(
                 end_principal, 
@@ -44,7 +63,7 @@ def processar_e_corrigir_dados(df_entrada):
             )
             grupo_matches = [
                 match[0] for match in matches 
-                if match[1] >= LIMITE_SIMILARIDADE
+                if match[1] >= limite_similaridade
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
@@ -52,6 +71,11 @@ def processar_e_corrigir_dados(df_entrada):
             
             for end_similar in grupo_matches:
                 mapa_correcao[end_similar] = endereco_oficial_original
+                
+        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+    
+    progresso_bar.empty()
+    st.success("Fuzzy Matching concluído!")
 
     # 3. Aplicação do Endereço Corrigido
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
@@ -62,42 +86,72 @@ def processar_e_corrigir_dados(df_entrada):
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
         Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
-        Latitude=('Latitude', 'first'),
-        Longitude=('Longitude', 'first')
+        Latitude=(COLUNA_LATITUDE, 'first'),
+        Longitude=(COLUNA_LONGITUDE, 'first')
     ).reset_index()
 
-    # 5. Formatação para o Circuit
-    endereco_completo = (
+    # --- 5. Formatação do DF para o CIRCUIT (COM Bairro) ---
+    endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro']
     )
-    
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
         ' | CEP: ' + df_agrupado['Zipcode/Postal code']
     )
 
-    # CRIAÇÃO DO DATAFRAME FINAL NA ORDEM CORRETA
     df_circuit = pd.DataFrame({
-        'Order ID': df_agrupado['Sequences_Agrupadas'],  # PRIMEIRA COLUNA
-        'Address': endereco_completo,
+        'Order ID': df_agrupado['Sequences_Agrupadas'], 
+        'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'],
         'Longitude': df_agrupado['Longitude'],
         'Notes': notas_completas
     })
+
+    # --- 6. Formatação do DF para IMPRESSÃO (AGORA COM 3 COLUNAS) ---
     
-    return df_circuit
+    # Coluna 1: Ordem ID
+    ordem_id_impressao = df_agrupado['Sequences_Agrupadas']
+    
+    # Coluna 2: Separador
+    separador = pd.Series(['-'] * len(df_agrupado))
+    
+    # Coluna 3: Endereço SIMPLES (apenas Endereço Corrigido)
+    endereco_imprimir_simples = df_agrupado['Endereco_Corrigido']
+    
+    df_impressao = pd.DataFrame({
+        'Ordem ID': ordem_id_impressao,
+        'Separador': separador,
+        'Endereco_Simples': endereco_imprimir_simples
+    })
+    
+    return df_circuit, df_impressao
 
 # --- Interface Streamlit ---
 
 st.title("🗺️ Corretor de Endereços para Circuit")
-st.markdown("---")
-st.markdown("Esta ferramenta usa Fuzzy Matching para agrupar endereços semelhantes e gerar um arquivo otimizado para importação no Circuit.")
 
-# Widget para fazer upload do arquivo
+# --- BARRA LATERAL (SIDEBAR) para Configurações ---
+st.sidebar.header("⚙️ Configurações de Correção")
+limite_similaridade_ajustado = st.sidebar.slider(
+    'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+    min_value=80,
+    max_value=100,
+    value=90,
+    step=1,
+    help="Valores maiores (ex: 95) agrupam apenas endereços quase idênticos."
+)
+st.sidebar.info(f"O limite de similaridade atual é: **{limite_similaridade_ajustado}%**")
+
+
+# --- CORPO PRINCIPAL DO APP ---
+
+st.markdown("---")
+st.subheader("1. Carregar Planilha")
+
 uploaded_file = st.file_uploader(
-    "1. Arraste e solte sua planilha (.csv ou .xlsx)", 
+    "Arraste e solte o arquivo aqui:", 
     type=['csv', 'xlsx']
 )
 
@@ -107,38 +161,67 @@ if uploaded_file is not None:
         if uploaded_file.name.endswith('.csv'):
             df_input = pd.read_csv(uploaded_file)
         else:
-            # Assume que é XLSX se não for CSV
-            df_input = pd.read_excel(uploaded_file)
+            df_input = pd.read_excel(uploaded_file, sheet_name=0)
         
-        st.success(f"Arquivo '{uploaded_file.name}' carregado com sucesso! Total de {len(df_input)} registros.")
-
+        st.success(f"Arquivo '{uploaded_file.name}' carregado! Total de **{len(df_input)}** registros.")
+        
         # Botão para iniciar o processamento
-        if st.button("2. Processar e Corrigir Endereços"):
-            with st.spinner('Corrigindo e agrupando endereços...'):
-                df_resultado = processar_e_corrigir_dados(df_input)
+        st.markdown("---")
+        st.subheader("2. Corrigir e Gerar Arquivos")
+        
+        if st.button("🚀 Iniciar Corretor de Endereços"):
+            df_circuit, df_impressao = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
             
-            st.markdown("---")
-            st.header("✅ Processamento Concluído!")
-            st.write(f"Endereços agrupados: **{len(df_resultado)}** (de {len(df_input)} entradas originais).")
-            
-            # Exibir amostra
-            st.subheader("Amostra do Arquivo Final")
-            st.dataframe(df_resultado.head(10))
-            
-            # 3. Botão para Download
-            # Converte o DataFrame para o formato Excel na memória
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_resultado.to_excel(writer, index=False, sheet_name='Circuit Import')
-            buffer.seek(0)
-            
-            st.download_button(
-                label="3. Baixar Arquivo Circuit_Import_FINAL.xlsx",
-                data=buffer,
-                file_name="Circuit_Import_FINAL.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_excel"
-            )
+            if df_circuit is not None:
+                st.markdown("---")
+                st.header("✅ Processamento Concluído!")
+                
+                total_entradas = len(df_input)
+                total_agrupados = len(df_circuit)
+                
+                st.metric(
+                    label="Endereços Únicos Corrigidos",
+                    value=total_agrupados,
+                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                )
+                
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                st.subheader("3A. Arquivo para Roteirização (Circuit)")
+                st.dataframe(df_circuit.head(5), use_container_width=True)
+                
+                # Download Circuit
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                buffer_circuit.seek(0)
+                
+                st.download_button(
+                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    data=buffer_circuit,
+                    file_name="Circuit_Import_FINAL.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_circuit"
+                )
+                
+                # --- SAÍDA PARA IMPRESSÃO (LISTA DE 3 COLUNAS) ---
+                st.markdown("---")
+                st.subheader("3B. Arquivo para Impressão (3 Colunas Separadas)")
+                st.caption("Contém três colunas separadas para Ordem, Separador (-) e Endereço Simples (sem Bairro).")
+                st.dataframe(df_impressao.head(5), use_container_width=True)
+                
+                # Download Impressão
+                buffer_impressao = io.BytesIO()
+                with pd.ExcelWriter(buffer_impressao, engine='openpyxl') as writer:
+                    df_impressao.to_excel(writer, index=False, sheet_name='Lista 3 Colunas')
+                buffer_impressao.seek(0)
+                
+                st.download_button(
+                    label="📄 Baixar ARQUIVO PARA IMPRESSÃO",
+                    data=buffer_impressao,
+                    file_name="Lista_Impressao_3Colunas.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_print"
+                )
 
     except Exception as e:
-        st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se as colunas 'Destination Address' e 'Sequence' estão presentes. Erro: {e}")
+        st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas (Destination Address, Sequence, etc.). Erro: {e}")

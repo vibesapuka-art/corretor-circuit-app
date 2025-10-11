@@ -4,13 +4,10 @@ from rapidfuzz import process, fuzz
 import io
 import streamlit as st
 import os
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut, GeocoderServiceError
-# from geopy.distance import geodesic # Não é mais necessário
 
 # --- Configurações da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Final)",
+    page_title="Corretor de Endereços Circuit (Finalizado)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,29 +17,6 @@ COLUNA_ENDERECO = 'Destination Address'
 COLUNA_SEQUENCE = 'Sequence'
 COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
-
-# Inicializa o geocodificador UMA VEZ
-@st.cache_resource
-def get_geolocator():
-    # user_agent deve ser único
-    return Nominatim(user_agent="circuit_address_corrector_app")
-
-geolocator = get_geolocator()
-
-def geocode_address(full_address, geolocator):
-    """Tenta obter Latitude e Longitude para um endereço corrigido."""
-    try:
-        # Tenta a geocodificação
-        location = geolocator.geocode(full_address, timeout=10)
-        if location:
-            return location.latitude, location.longitude
-        return None, None
-    except GeocoderTimedOut:
-        return None, None 
-    except GeocoderServiceError:
-        return None, None
-    except Exception:
-        return None, None
 
 
 def limpar_endereco(endereco):
@@ -57,10 +31,9 @@ def limpar_endereco(endereco):
 
 
 @st.cache_data
-# Removemos 'distancia_maxima_km' da assinatura
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
-    Função principal que aplica a correção e a geocodificação sem filtro de sanidade.
+    Função principal que aplica a correção e o agrupamento, usando as Lat/Lon originais.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
@@ -105,14 +78,16 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 3. Aplicação do Endereço Corrigido
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
 
-    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE)
+    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE - MELHOR AGRUPAMENTO)
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
         Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
-        Latitude_Original=(COLUNA_LATITUDE, 'first'),
-        Longitude_Original=(COLUNA_LONGITUDE, 'first'),
+        
+        # USA AS LATITUDE E LONGITUDE ORIGINAIS DO PRIMEIRO PEDIDO DO GRUPO
+        Latitude=(COLUNA_LATITUDE, 'first'),
+        Longitude=(COLUNA_LONGITUDE, 'first'),
         
         # Mantemos o Bairro e Zipcode mais frequentes para o resultado final
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
@@ -120,50 +95,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         
     ).reset_index()
 
-    # 5. --- GERAÇÃO DO NOVO ENDEREÇO E GEOCODIFICAÇÃO (SEM FILTRO) ---
-    st.subheader("⚠️ Geocodificação em Andamento...")
-    st.caption("Priorizando a Latitude/Longitude corrigida pelo nome do endereço.")
-    
-    # Endereço Completo para Geocodificar
-    df_agrupado['Endereco_Completo_Padrao'] = (
-        df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado'] + ', ' +
-        df_agrupado['City']
-    )
-    
-    # Prepara novas colunas
-    df_agrupado['Latitude'] = None
-    df_agrupado['Longitude'] = None
-    
-    total_enderecos = len(df_agrupado)
-    total_corrigidos = 0
-    
-    for i, row in df_agrupado.iterrows():
-        original_lat = row['Latitude_Original']
-        original_lon = row['Longitude_Original']
-        
-        # 5.1 Tenta Geocodificar
-        new_lat, new_lon = geocode_address(row['Endereco_Completo_Padrao'], geolocator)
-        
-        # 5.2 Atribuição: USA O NOVO PIN SE EXISTIR, SEMPRE.
-        if new_lat is not None:
-            df_agrupado.at[i, 'Latitude'] = new_lat
-            df_agrupado.at[i, 'Longitude'] = new_lon
-            total_corrigidos += 1
-        else:
-            # Mantém o original apenas se a geocodificação falhar
-            df_agrupado.at[i, 'Latitude'] = original_lat
-            df_agrupado.at[i, 'Longitude'] = original_lon
-            
-        st.progress((i + 1) / total_enderecos, text=f"Geocodificando {i+1} de {total_enderecos} endereços...")
-
-    st.progress(1.0, text="Geocodificação concluída!")
-    st.info(f"Geocodificação: **{total_corrigidos}** endereços únicos foram corrigidos com o novo Latitude/Longitude.")
-    
-    # Remove colunas auxiliares
-    df_agrupado = df_agrupado.drop(columns=['Latitude_Original', 'Longitude_Original', 'Endereco_Completo_Padrao'])
-
-    # 6. Formatação do DF para o CIRCUIT 
+    # 5. Formatação do DF para o CIRCUIT (USANDO LAT/LON ORIGINAIS)
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado']
@@ -177,12 +109,12 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
-        'Latitude': df_agrupado['Latitude'],  
-        'Longitude': df_agrupado['Longitude'], 
+        'Latitude': df_agrupado['Latitude'],  # <--- COORDENADA ORIGINAL
+        'Longitude': df_agrupado['Longitude'], # <--- COORDENADA ORIGINAL
         'Notes': notas_completas
     })
 
-    # 7. Formatação do DF para IMPRESSÃO (3 COLUNAS)
+    # 6. Formatação do DF para IMPRESSÃO (3 COLUNAS)
     ordem_id_impressao = df_agrupado['Sequences_Agrupadas']
     separador = pd.Series(['-'] * len(df_agrupado))
     endereco_imprimir_simples = df_agrupado['Endereco_Corrigido']
@@ -202,7 +134,7 @@ st.title("🗺️ Corretor de Endereços para Circuit (Final)")
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.header("⚙️ Configurações de Correção")
 
-# Slider de Similaridade (mantido)
+# Slider de Similaridade (O ÚNICO SLIDER RESTANTE)
 limite_similaridade_ajustado = st.sidebar.slider(
     'Ajuste a Precisão do Corretor (Fuzzy Matching):',
     min_value=80,
@@ -236,8 +168,8 @@ if uploaded_file is not None:
         st.markdown("---")
         st.subheader("2. Corrigir e Gerar Arquivos")
         
-        if st.button("🚀 Iniciar Corretor e Geocodificação"):
-            # Chama a função principal (sem o parâmetro de distância)
+        if st.button("🚀 Iniciar Corretor e Agrupamento"):
+            # Chama a função principal
             df_circuit, df_impressao = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
             
             if df_circuit is not None:
@@ -248,14 +180,14 @@ if uploaded_file is not None:
                 total_agrupados = len(df_circuit)
                 
                 st.metric(
-                    label="Endereços Únicos Corrigidos",
+                    label="Endereços Únicos Agrupados",
                     value=total_agrupados,
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
                 
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("3A. Arquivo para Roteirização (Circuit)")
-                st.caption("Contém as coordenadas **corrigidas (sem filtro)** para maior precisão.")
+                st.caption("Contém as coordenadas **originais** da sua planilha de entrada.")
                 st.dataframe(df_circuit.head(5), use_container_width=True)
                 
                 # Download Circuit
@@ -267,7 +199,7 @@ if uploaded_file is not None:
                 st.download_button(
                     label="📥 Baixar ARQUIVO PARA CIRCUIT",
                     data=buffer_circuit,
-                    file_name="Circuit_Import_FINAL.xlsx",
+                    file_name="Circuit_Import_ORIGINAL.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )

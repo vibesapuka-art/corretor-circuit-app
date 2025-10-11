@@ -6,11 +6,11 @@ import streamlit as st
 import os
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
-from geopy.distance import geodesic
+# from geopy.distance import geodesic # Não é mais necessário
 
 # --- Configurações da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Avançado)",
+    page_title="Corretor de Endereços Circuit (Final)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -57,9 +57,10 @@ def limpar_endereco(endereco):
 
 
 @st.cache_data
-def processar_e_corrigir_dados(df_entrada, limite_similaridade, distancia_maxima_km):
+# Removemos 'distancia_maxima_km' da assinatura
+def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
-    Função principal que aplica a correção, a geocodificação e o Filtro de Sanidade.
+    Função principal que aplica a correção e a geocodificação sem filtro de sanidade.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
@@ -104,22 +105,29 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, distancia_maxima
     # 3. Aplicação do Endereço Corrigido
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
 
-    # 4. Agrupamento (Mantém Lat/Lon ORIGINAIS para comparação)
-    colunas_agrupamento = ['Endereco_Corrigido', 'Bairro', 'City', 'Zipcode/Postal code']
+    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE)
+    colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
         Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
         Latitude_Original=(COLUNA_LATITUDE, 'first'),
-        Longitude_Original=(COLUNA_LONGITUDE, 'first')
+        Longitude_Original=(COLUNA_LONGITUDE, 'first'),
+        
+        # Mantemos o Bairro e Zipcode mais frequentes para o resultado final
+        Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
+        Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0])
+        
     ).reset_index()
 
-    # 5. --- GERAÇÃO DO NOVO ENDEREÇO E GEOCODIFICAÇÃO COM FILTRO ---
-    st.subheader(f"⚠️ Geocodificação (Máx. {distancia_maxima_km * 1000:.0f} metros)...")
+    # 5. --- GERAÇÃO DO NOVO ENDEREÇO E GEOCODIFICAÇÃO (SEM FILTRO) ---
+    st.subheader("⚠️ Geocodificação em Andamento...")
+    st.caption("Priorizando a Latitude/Longitude corrigida pelo nome do endereço.")
     
+    # Endereço Completo para Geocodificar
     df_agrupado['Endereco_Completo_Padrao'] = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro'] + ', ' +
+        df_agrupado['Bairro_Agrupado'] + ', ' +
         df_agrupado['City']
     )
     
@@ -128,8 +136,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, distancia_maxima
     df_agrupado['Longitude'] = None
     
     total_enderecos = len(df_agrupado)
-    total_rejeitados = 0
-    total_originais_mantidos = 0
+    total_corrigidos = 0
     
     for i, row in df_agrupado.iterrows():
         original_lat = row['Latitude_Original']
@@ -138,53 +145,33 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, distancia_maxima
         # 5.1 Tenta Geocodificar
         new_lat, new_lon = geocode_address(row['Endereco_Completo_Padrao'], geolocator)
         
-        usar_novo_pin = False
-        
-        if new_lat is not None and original_lat is not None:
-            # 5.2 VERIFICAÇÃO DE SANIDADE
-            try:
-                ponto_original = (original_lat, original_lon)
-                ponto_novo = (new_lat, new_lon)
-                
-                # Calcula a distância entre os dois pontos
-                distancia = geodesic(ponto_original, ponto_novo).km
-                
-                if distancia <= distancia_maxima_km:
-                    usar_novo_pin = True
-                else:
-                    total_rejeitados += 1
-            except Exception:
-                # Se der erro no cálculo da distância (dados mal formatados), mantém o original
-                pass
-        
-        # 5.3 Atribuição
-        if usar_novo_pin:
+        # 5.2 Atribuição: USA O NOVO PIN SE EXISTIR, SEMPRE.
+        if new_lat is not None:
             df_agrupado.at[i, 'Latitude'] = new_lat
             df_agrupado.at[i, 'Longitude'] = new_lon
+            total_corrigidos += 1
         else:
-            # Mantém o original (se for float e não None)
+            # Mantém o original apenas se a geocodificação falhar
             df_agrupado.at[i, 'Latitude'] = original_lat
             df_agrupado.at[i, 'Longitude'] = original_lon
-            if new_lat is not None:
-                total_originais_mantidos += 1
             
-        st.progress((i + 1) / total_enderecos, text=f"Geocodificando e Filtrando {i+1} de {total_enderecos} endereços...")
+        st.progress((i + 1) / total_enderecos, text=f"Geocodificando {i+1} de {total_enderecos} endereços...")
 
-    st.progress(1.0, text="Geocodificação e Filtragem concluídas!")
-    st.info(f"Filtro de Sanidade: **{total_rejeitados}** coordenadas novas foram rejeitadas (acima de {distancia_maxima_km * 1000:.0f} metros) e **{total_originais_mantidos}** foram mantidas por falha de geocodificação.")
+    st.progress(1.0, text="Geocodificação concluída!")
+    st.info(f"Geocodificação: **{total_corrigidos}** endereços únicos foram corrigidos com o novo Latitude/Longitude.")
     
     # Remove colunas auxiliares
     df_agrupado = df_agrupado.drop(columns=['Latitude_Original', 'Longitude_Original', 'Endereco_Completo_Padrao'])
 
-    # 6. Formatação do DF para o CIRCUIT (COM COORDENADAS FILTRADAS)
+    # 6. Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro']
+        df_agrupado['Bairro_Agrupado']
     )
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
-        ' | CEP: ' + df_agrupado['Zipcode/Postal code']
+        ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
 
     df_circuit = pd.DataFrame({
@@ -210,24 +197,12 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, distancia_maxima
 
 # --- Interface Streamlit ---
 
-st.title("🗺️ Corretor de Endereços para Circuit (Avançado)")
+st.title("🗺️ Corretor de Endereços para Circuit (Final)")
 
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.header("⚙️ Configurações de Correção")
 
-# NOVO SLIDER: Distância máxima (AGORA COM VALOR PADRÃO DE 0.5KM)
-distancia_maxima_ajustada = st.sidebar.slider(
-    'Filtro de Localização (Máx. Distância para Corrigir):',
-    min_value=0.1, # 100 metros
-    max_value=1.0, # 1000 metros
-    value=0.5, # 500 metros
-    step=0.1,
-    format='%.1f Km', # Formato para exibir
-    help="Se a nova coordenada estiver mais longe do que este valor da coordenada original, o sistema manterá a coordenada original."
-)
-distancia_em_metros = distancia_maxima_ajustada * 1000 # Para exibir na mensagem
-
-# Slider de Similaridade (já existente)
+# Slider de Similaridade (mantido)
 limite_similaridade_ajustado = st.sidebar.slider(
     'Ajuste a Precisão do Corretor (Fuzzy Matching):',
     min_value=80,
@@ -236,7 +211,7 @@ limite_similaridade_ajustado = st.sidebar.slider(
     step=1,
     help="Valores maiores (ex: 95) agrupam apenas endereços quase idênticos."
 )
-st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%** e o filtro de localização é **{distancia_em_metros:.0f} metros**.")
+st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**.")
 
 
 # --- CORPO PRINCIPAL DO APP ---
@@ -262,8 +237,8 @@ if uploaded_file is not None:
         st.subheader("2. Corrigir e Gerar Arquivos")
         
         if st.button("🚀 Iniciar Corretor e Geocodificação"):
-            # Chama a função principal
-            df_circuit, df_impressao = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado, distancia_maxima_ajustada)
+            # Chama a função principal (sem o parâmetro de distância)
+            df_circuit, df_impressao = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
             
             if df_circuit is not None:
                 st.markdown("---")
@@ -280,7 +255,7 @@ if uploaded_file is not None:
                 
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("3A. Arquivo para Roteirização (Circuit)")
-                st.caption("Contém as coordenadas **FILTRADAS** para maior precisão.")
+                st.caption("Contém as coordenadas **corrigidas (sem filtro)** para maior precisão.")
                 st.dataframe(df_circuit.head(5), use_container_width=True)
                 
                 # Download Circuit
@@ -292,7 +267,7 @@ if uploaded_file is not None:
                 st.download_button(
                     label="📥 Baixar ARQUIVO PARA CIRCUIT",
                     data=buffer_circuit,
-                    file_name="Circuit_Import_FILTRADO.xlsx",
+                    file_name="Circuit_Import_FINAL.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )

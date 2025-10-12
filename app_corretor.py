@@ -139,11 +139,10 @@ def processar_rota_para_impressao(df_input):
     para minúsculas antes de serem passadas.
     """
     coluna_notes_lower = 'notes'
-    coluna_address_lower = 'address'
-
-    # 1. Verificar se as colunas essenciais existem (em minúsculas)
+    
+    # 1. Verificar se a coluna essencial 'notes' existe (em minúsculas)
     if coluna_notes_lower not in df_input.columns:
-        # Este erro é capturado e reformatado no bloco try/except da interface
+        # Erro é capturado e reformatado no bloco try/except da interface
         raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
     df = df_input.copy()
@@ -159,17 +158,8 @@ def processar_rota_para_impressao(df_input):
     df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
     
     
-    # 3. Formatação Final da Tabela
-    colunas_finais = ['Ordem ID']
-    
-    # Se a coluna de endereço existir, renomeie-a e inclua
-    if coluna_address_lower in df_input.columns:
-        df = df.rename(columns={coluna_address_lower: 'Endereço'})
-        colunas_finais.append('Endereço')
-    else:
-        st.warning("A coluna de Endereço não foi encontrada para inclusão na lista de impressão.")
-    
-    colunas_finais.append('Anotações Completas')
+    # 3. Formatação Final da Tabela (APENAS ID e ANOTAÇÕES)
+    colunas_finais = ['Ordem ID', 'Anotações Completas']
     
     df_final = df[colunas_finais]
     
@@ -296,8 +286,10 @@ with tab2:
     if uploaded_file_pos is not None:
         try:
             if uploaded_file_pos.name.endswith('.csv'):
+                # Tenta CSV
                 df_input_pos = pd.read_csv(uploaded_file_pos)
             else:
+                # Tenta Excel com o nome da aba
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
             # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
@@ -313,27 +305,38 @@ with tab2:
             
             if df_final_pos is not None and not df_final_pos.empty:
                 st.markdown("---")
-                st.subheader("2.2 Resultado Final (Ordem ID + Anotações)")
+                st.subheader("2.2 Resultado Final (Ordem ID e Anotações)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto para cópia rápida.")
                 
                 # Exibe a tabela
                 st.dataframe(df_final_pos, use_container_width=True)
 
-                # Opção de Copiar para a Área de Transferência
-                csv_data = df_final_pos.to_csv(index=False, header=False, sep='\t')
+                # --- LÓGICA DE COPIA PERSONALIZADA (ID - ANOTAÇÕES) ---
                 
-                st.markdown("### 2.3 Copiar para a Área de Transferência")
+                # Combina as duas colunas com o separador " - "
+                df_final_pos['Linha Impressão'] = (
+                    df_final_pos['Ordem ID'].astype(str) + 
+                    ' - ' + 
+                    df_final_pos['Anotações Completas'].astype(str)
+                )
+                
+                # Converte para string sem cabeçalho e sem índice, com quebras de linha
+                copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False)
+                
+                st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
                 st.info("Para copiar para o Excel/Word/etc., selecione todo o texto abaixo (Ctrl+A) e pressione Ctrl+C.")
                 
                 st.text_area(
-                    "Conteúdo da Tabela (Separação por Tabulação):", 
-                    csv_data, 
+                    "Conteúdo da Lista de Impressão (ID - Anotações):", 
+                    copia_data, 
                     height=300
                 )
 
-                # Download como Excel
+                # Download como Excel (mantém o formato tabulado, caso o usuário queira importar)
                 buffer = io.BytesIO()
+                # A versão para download em Excel terá as duas colunas separadas.
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
+                    df_final_pos[['Ordem ID', 'Anotações Completas']].to_excel(writer, index=False, sheet_name='Lista Impressao')
                 buffer.seek(0)
                 
                 st.download_button(
@@ -349,7 +352,7 @@ with tab2:
             if "Table 3" in str(ke):
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
             elif 'notes' in str(ke):
-                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada após a padronização. Verifique se o arquivo da rota está correto.")
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
             else:
                  st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:

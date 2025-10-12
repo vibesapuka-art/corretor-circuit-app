@@ -19,6 +19,10 @@ st.markdown("""
     text-align: left;
     font-family: monospace;
 }
+/* Estilo para alinhar os checkboxes na vertical */
+div[data-testid="stVerticalBlock"] > div {
+    gap: 0.5rem; /* Reduz o espaço entre os elementos na vertical */
+}
 </style>
 """, unsafe_allow_html=True)
 # --------------------------------------------------------------------------------------
@@ -71,6 +75,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df = df_entrada.copy()
     
     # Cria uma coluna numérica temporária para a ordenação (ignorando o *)
+    # Esta coluna é crucial para a agregação 'count' e a ordenação final.
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(0).astype(int)
 
@@ -115,7 +120,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         # Agrupa as sequências (que já contêm o *)
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))), 
-        Total_Pacotes=('Sequence_Num', 'count'), # Usa a contagem da coluna numérica (ignora o *)
+        Total_Pacotes=('Sequence_Num', 'count'), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
@@ -126,7 +131,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         
     ).reset_index()
 
-    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência.
+    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # 6. Formatação do DF para o CIRCUIT 
@@ -253,7 +258,17 @@ with tab1:
     
     if st.session_state['df_original'] is not None:
         
-        ordens_originais = sorted(st.session_state['df_original'][COLUNA_SEQUENCE].unique())
+        # --- CORREÇÃO DA ORDEM DE EXIBIÇÃO ---
+        # 1. Obter IDs únicos
+        ordens_originais_str = st.session_state['df_original'][COLUNA_SEQUENCE].unique()
+        # 2. Converter para inteiro, ignorando erros (para IDs não numéricos)
+        # 3. Classificar pela ordem numérica
+        ordens_originais_sorted = sorted(
+            ordens_originais_str, 
+            key=lambda x: int(x) if str(x).isdigit() else float('inf')
+        )
+        # --------------------------------------
+        
         
         # Função de callback para atualizar o set de IDs volumosos
         def update_volumoso_ids(order_id, is_checked):
@@ -263,25 +278,30 @@ with tab1:
                 st.session_state['volumoso_ids'].remove(order_id)
 
         # Usar colunas para dispor os checkboxes em uma grade
-        cols = st.columns(5) # 5 colunas para caber mais na tela
         
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
 
-        # Loop para criar os checkboxes
-        for i, order_id in enumerate(ordens_originais):
-            col = cols[i % 5] # Alterna entre as 5 colunas
-            
-            # Estado inicial do checkbox (checa se o ID está no set)
-            is_checked = order_id in st.session_state['volumoso_ids']
-            
-            # Cria o checkbox com uma chave única e a ação de callback
-            col.checkbox(
-                str(order_id), 
-                value=is_checked, 
-                key=f"vol_{order_id}",
-                on_change=update_volumoso_ids, 
-                args=(order_id, not is_checked) # args para a função de callback
-            )
+        # Container para os checkboxes
+        with st.container():
+             # Loop para criar os checkboxes
+            cols = st.columns(5) # 5 colunas para caber mais na tela
+            for i, order_id in enumerate(ordens_originais_sorted):
+                col = cols[i % 5] # Alterna entre as 5 colunas
+                
+                # Estado inicial do checkbox (checa se o ID está no set)
+                is_checked = order_id in st.session_state['volumoso_ids']
+                
+                # Cria o checkbox com uma chave única e a ação de callback
+                col.checkbox(
+                    str(order_id), 
+                    value=is_checked, 
+                    key=f"vol_{order_id}",
+                    on_change=update_volumoso_ids, 
+                    # A lógica aqui é invertida para o on_change: 
+                    # Se o valor atual é `is_checked`, o novo valor será `not is_checked`.
+                    args=(order_id, not is_checked) 
+                )
+
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
         
@@ -340,7 +360,7 @@ with tab1:
                 
                 # Download Circuit
                 buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openypxl') as writer:
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
                     df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
                 buffer_circuit.seek(0)
                 

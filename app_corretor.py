@@ -71,7 +71,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df = df_entrada.copy()
     
     # Cria uma coluna numérica temporária para a ordenação (ignorando o *)
-    # st.session_state['volumoso_ids'] é uma lista de IDs.
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(0).astype(int)
 
@@ -208,7 +207,7 @@ with tab1:
     if 'df_original' not in st.session_state:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
-        st.session_state['volumoso_ids'] = []
+        st.session_state['volumoso_ids'] = set() # Usar set para eficiência
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -232,6 +231,12 @@ with tab1:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
+            # Resetar as marcações se um novo arquivo for carregado
+            if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
+                 st.session_state['volumoso_ids'] = set()
+                 st.session_state['last_uploaded_name'] = uploaded_file_pre.name
+
+
             st.session_state['df_original'] = df_input_pre.copy()
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
@@ -248,24 +253,37 @@ with tab1:
     
     if st.session_state['df_original'] is not None:
         
-        df_display = st.session_state['df_original'].copy()
-        df_display['Exibir'] = (
-            '#' + df_display[COLUNA_SEQUENCE].astype(str) + 
-            ' - ' + df_display[COLUNA_ENDERECO].astype(str)
-        )
+        ordens_originais = sorted(st.session_state['df_original'][COLUNA_SEQUENCE].unique())
         
-        ordens_originais = df_display[COLUNA_SEQUENCE].unique()
+        # Função de callback para atualizar o set de IDs volumosos
+        def update_volumoso_ids(order_id, is_checked):
+            if is_checked:
+                st.session_state['volumoso_ids'].add(order_id)
+            elif order_id in st.session_state['volumoso_ids']:
+                st.session_state['volumoso_ids'].remove(order_id)
+
+        # Usar colunas para dispor os checkboxes em uma grade
+        cols = st.columns(5) # 5 colunas para caber mais na tela
         
-        # A caixa de seleção de múltiplas escolhas permite ao usuário selecionar as ordens volumosas
-        st.session_state['volumoso_ids'] = st.multiselect(
-            'Selecione as Ordens de Serviço (do original) que são Volumosas (Serão marcadas com *):',
-            options=ordens_originais,
-            default=st.session_state['volumoso_ids'],
-            format_func=lambda x: df_display[df_display[COLUNA_SEQUENCE] == x]['Exibir'].iloc[0]
-        )
-        
-        st.markdown(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
-        st.caption("A ordem de exibição é apenas para facilitar a marcação.")
+        st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
+
+        # Loop para criar os checkboxes
+        for i, order_id in enumerate(ordens_originais):
+            col = cols[i % 5] # Alterna entre as 5 colunas
+            
+            # Estado inicial do checkbox (checa se o ID está no set)
+            is_checked = order_id in st.session_state['volumoso_ids']
+            
+            # Cria o checkbox com uma chave única e a ação de callback
+            col.checkbox(
+                str(order_id), 
+                value=is_checked, 
+                key=f"vol_{order_id}",
+                on_change=update_volumoso_ids, 
+                args=(order_id, not is_checked) # args para a função de callback
+            )
+
+        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
         
         st.markdown("---")
         st.subheader("1.3 Configurar e Processar")
@@ -289,12 +307,16 @@ with tab1:
             # Converte a coluna para string para aplicar o *
             df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
             
+            # Aplica o * nos IDs que estão no set
             for id_volumoso in st.session_state['volumoso_ids']:
-                # Encontra a linha da ordem e adiciona o *
-                df_para_processar.loc[
-                    df_para_processar[COLUNA_SEQUENCE] == str(id_volumoso), 
-                    COLUNA_SEQUENCE
-                ] = str(id_volumoso) + '*'
+                str_id_volumoso = str(id_volumoso)
+                
+                # Se já tiver *, não adiciona de novo (segurança)
+                if not str_id_volumoso.endswith('*'):
+                    df_para_processar.loc[
+                        df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                        COLUNA_SEQUENCE
+                    ] = str_id_volumoso + '*'
 
             # 2. Iniciar o processamento e agrupamento
             df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
@@ -318,7 +340,7 @@ with tab1:
                 
                 # Download Circuit
                 buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                with pd.ExcelWriter(buffer_circuit, engine='openypxl') as writer:
                     df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
                 buffer_circuit.seek(0)
                 
@@ -331,10 +353,12 @@ with tab1:
                 )
 
     # Limpa a sessão se o arquivo for removido
-    elif uploaded_file_pre is None:
+    elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
         st.session_state['df_original'] = None
-        st.session_state['volumoso_ids'] = []
-        
+        st.session_state['volumoso_ids'] = set()
+        st.session_state['last_uploaded_name'] = None
+        st.rerun() # Força o Streamlit a limpar a tela
+
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)

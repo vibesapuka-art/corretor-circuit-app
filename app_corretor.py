@@ -74,10 +74,11 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 
     df = df_entrada.copy()
     
-    # Cria uma coluna numérica temporária para a ordenação (ignorando o *)
-    # Esta coluna é crucial para a agregação 'count' e a ordenação final.
+    # Cria uma coluna numérica temporária para a ordenação (ignorando o * e tratando texto)
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
-    df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(0).astype(int)
+    # Tenta converter para numérico, se falhar, preenche com um valor muito alto para ir para o final
+    df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
+
 
     # 1. Limpeza e Normalização (Fuzzy Matching)
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
@@ -119,8 +120,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         # Agrupa as sequências (que já contêm o *)
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))), 
-        Total_Pacotes=('Sequence_Num', 'count'), 
+        # NOTA: O sort na lambda é crucial para que, dentro do grupo, a ordem seja numérica (ex: 1,2,3*)
+        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
+        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), # Conta apenas os pacotes que eram numéricos
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
@@ -132,6 +134,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     ).reset_index()
 
     # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
+    # Filtra os valores infinitos (texto) para não atrapalhar a ordenação inicial
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # 6. Formatação do DF para o CIRCUIT 
@@ -140,7 +143,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         df_agrupado['Bairro_Agrupado']
     )
     notas_completas = (
-        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(str) + 
+        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
@@ -258,16 +261,13 @@ with tab1:
     
     if st.session_state['df_original'] is not None:
         
-        # --- CORREÇÃO DA ORDEM DE EXIBIÇÃO ---
-        # 1. Obter IDs únicos
-        ordens_originais_str = st.session_state['df_original'][COLUNA_SEQUENCE].unique()
-        # 2. Converter para inteiro, ignorando erros (para IDs não numéricos)
-        # 3. Classificar pela ordem numérica
-        ordens_originais_sorted = sorted(
-            ordens_originais_str, 
-            key=lambda x: int(x) if str(x).isdigit() else float('inf')
-        )
-        # --------------------------------------
+        # --- CORREÇÃO DA ORDEM DE EXIBIÇÃO: ORDENAÇÃO NUMÉRICA FORÇADA ---
+        df_temp = st.session_state['df_original'].copy()
+        df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
+        
+        # Lista as ordens únicas e classifica pela coluna numérica temporária
+        ordens_originais_sorted = df_temp.sort_values('Order_Num')[COLUNA_SEQUENCE].astype(str).unique()
+        # ----------------------------------------------------------------
         
         
         # Função de callback para atualizar o set de IDs volumosos
@@ -297,8 +297,7 @@ with tab1:
                     value=is_checked, 
                     key=f"vol_{order_id}",
                     on_change=update_volumoso_ids, 
-                    # A lógica aqui é invertida para o on_change: 
-                    # Se o valor atual é `is_checked`, o novo valor será `not is_checked`.
+                    # args: o primeiro é o ID, o segundo é o NOVO estado do checkbox
                     args=(order_id, not is_checked) 
                 )
 
@@ -324,19 +323,18 @@ with tab1:
             # 1. Aplicar a marcação * no DF antes de processar
             df_para_processar = st.session_state['df_original'].copy()
             
-            # Converte a coluna para string para aplicar o *
+            # Garante que a coluna Sequence seja string para manipulação
             df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
             
             # Aplica o * nos IDs que estão no set
             for id_volumoso in st.session_state['volumoso_ids']:
                 str_id_volumoso = str(id_volumoso)
                 
-                # Se já tiver *, não adiciona de novo (segurança)
-                if not str_id_volumoso.endswith('*'):
-                    df_para_processar.loc[
-                        df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
-                        COLUNA_SEQUENCE
-                    ] = str_id_volumoso + '*'
+                # Filtra a coluna Sequence para garantir que apenas o ID exato seja marcado
+                df_para_processar.loc[
+                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                    COLUNA_SEQUENCE
+                ] = str_id_volumoso + '*'
 
             # 2. Iniciar o processamento e agrupamento
             df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
@@ -377,7 +375,7 @@ with tab1:
         st.session_state['df_original'] = None
         st.session_state['volumoso_ids'] = set()
         st.session_state['last_uploaded_name'] = None
-        st.rerun() # Força o Streamlit a limpar a tela
+        st.rerun() 
 
 
 # ----------------------------------------------------------------------------------

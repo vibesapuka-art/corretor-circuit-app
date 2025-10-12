@@ -5,19 +5,22 @@ import io
 import streamlit as st
 import os
 
-# --- Configurações da Página ---
+# --- Configurações Iniciais da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Apenas Import)",
+    page_title="Circuit Flow Completo",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- Configurações Principais (Colunas) ---
+# --- Configurações Globais (Colunas) ---
 COLUNA_ENDERECO = 'Destination Address'
 COLUNA_SEQUENCE = 'Sequence'
 COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 
+# ===============================================
+# FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
+# ===============================================
 
 def limpar_endereco(endereco):
     """
@@ -44,7 +47,7 @@ def limpar_endereco(endereco):
 @st.cache_data
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
-    Função principal que aplica a correção e o agrupamento, usando as Lat/Lon originais.
+    Função principal que aplica a correção e o agrupamento.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
@@ -123,79 +126,212 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     
     return df_circuit
 
-# --- Interface Streamlit ---
 
-st.title("🗺️ Corretor de Endereços para Circuit (Apenas Import)")
+# ===============================================
+# FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ===============================================
 
-# --- BARRA LATERAL (SIDEBAR) ---
-st.sidebar.header("⚙️ Configurações de Correção")
+def processar_rota_para_impressao(df_input):
+    """
+    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    """
+    # 1. Encontrar a coluna "Notes" (o nome pode variar)
+    coluna_notes = None
+    for col in df_input.columns:
+        if 'notes' in col.lower():
+            coluna_notes = col
+            break
+    
+    if coluna_notes is None:
+        st.error("Erro: A coluna 'Notes' (Anotações) não foi encontrada no arquivo da rota.")
+        return None
+    
+    df = df_input.copy()
+    df[coluna_notes] = df[coluna_notes].astype(str)
+    df = df.dropna(subset=[coluna_notes]) 
+    
+    # 2. Separar a coluna Notes: Parte antes do ';' é o Order ID
+    df[coluna_notes] = df[coluna_notes].str.strip('"')
+    
+    # Divide a coluna na primeira ocorrência de ';'
+    df_split = df[coluna_notes].str.split(';', n=1, expand=True)
+    df['Ordem ID'] = df_split[0].str.strip()
+    df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
+    
+    
+    # 3. Formatação Final da Tabela
+    colunas_finais = ['Ordem ID']
+    coluna_endereco = None
+    
+    # Inclui a coluna 'Address'
+    for col in df_input.columns:
+        if 'address' in col.lower():
+            colunas_finais.append(col) 
+            coluna_endereco = col
+            break
+    
+    colunas_finais.append('Anotações Completas')
+    
+    # Renomeia o Address para 'Endereço'
+    if coluna_endereco:
+        df = df.rename(columns={coluna_endereco: 'Endereço'})
+    
+    df_final = df[colunas_finais]
+    
+    return df_final
 
-limite_similaridade_ajustado = st.sidebar.slider(
-    'Ajuste a Precisão do Corretor (Fuzzy Matching):',
-    min_value=80,
-    max_value=100,
-    value=90, 
-    step=1,
-    help="Use 100% para evitar que endereços na mesma rua, mas com números diferentes, sejam agrupados."
-)
-st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**.")
+
+# ===============================================
+# INTERFACE PRINCIPAL
+# ===============================================
+
+st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
+
+# Cria as abas
+tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
 
 
-# --- CORPO PRINCIPAL DO APP ---
+# ----------------------------------------------------------------------------------
+# ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
+# ----------------------------------------------------------------------------------
 
-st.markdown("---")
-st.subheader("1. Carregar Planilha Original")
+with tab1:
+    st.header("1. Gerar Arquivo para Importar no Circuit")
+    st.caption("Esta etapa corrige erros de digitação e agrupa pedidos no mesmo endereço.")
 
-uploaded_file = st.file_uploader(
-    "Arraste e solte o arquivo original aqui:", 
-    type=['csv', 'xlsx']
-)
+    st.markdown("---")
+    st.subheader("Configurações:")
+    limite_similaridade_ajustado = st.slider(
+        'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+        min_value=80,
+        max_value=100,
+        value=100, 
+        step=1,
+        help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
+    )
+    st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
 
-if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df_input = pd.read_csv(uploaded_file)
-        else:
-            df_input = pd.read_excel(uploaded_file, sheet_name=0)
-        
-        st.success(f"Arquivo '{uploaded_file.name}' carregado! Total de **{len(df_input)}** registros.")
-        
-        st.markdown("---")
-        st.subheader("2. Gerar Arquivo de Roteirização")
-        
-        if st.button("🚀 Iniciar Corretor e Agrupamento"):
-            df_circuit = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
+
+    st.markdown("---")
+    st.subheader("1.1 Carregar Planilha Original")
+
+    uploaded_file_pre = st.file_uploader(
+        "Arraste e solte o arquivo original (CSV/Excel) aqui:", 
+        type=['csv', 'xlsx'],
+        key="file_pre"
+    )
+
+    if uploaded_file_pre is not None:
+        try:
+            if uploaded_file_pre.name.endswith('.csv'):
+                df_input_pre = pd.read_csv(uploaded_file_pre)
+            else:
+                df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            if df_circuit is not None:
+            st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
+            
+            st.markdown("---")
+            st.subheader("1.2 Processar")
+            
+            if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre"):
+                df_circuit = processar_e_corrigir_dados(df_input_pre, limite_similaridade_ajustado)
+                
+                if df_circuit is not None:
+                    st.markdown("---")
+                    st.header("✅ Resultado Concluído!")
+                    
+                    total_entradas = len(df_input_pre)
+                    total_agrupados = len(df_circuit)
+                    
+                    st.metric(
+                        label="Endereços Únicos Agrupados",
+                        value=total_agrupados,
+                        delta=f"-{total_entradas - total_agrupados} agrupados"
+                    )
+                    
+                    # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                    st.subheader("Arquivo para Roteirização (Circuit)")
+                    st.dataframe(df_circuit.head(5), use_container_width=True)
+                    
+                    # Download Circuit
+                    buffer_circuit = io.BytesIO()
+                    with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                        df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                    buffer_circuit.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                        data=buffer_circuit,
+                        file_name="Circuit_Import_FINAL.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_excel_circuit"
+                    )
+
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
+
+
+# ----------------------------------------------------------------------------------
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ----------------------------------------------------------------------------------
+
+with tab2:
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+
+    st.markdown("---")
+    st.subheader("2.1 Carregar Arquivo da Rota")
+
+    uploaded_file_pos = st.file_uploader(
+        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="file_pos"
+    )
+
+    if uploaded_file_pos is not None:
+        try:
+            if uploaded_file_pos.name.endswith('.csv'):
+                df_input_pos = pd.read_csv(uploaded_file_pos)
+            else:
+                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=0)
+            
+            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
+            
+            # Processa os dados
+            df_final_pos = processar_rota_para_impressao(df_input_pos)
+            
+            if df_final_pos is not None and not df_final_pos.empty:
                 st.markdown("---")
-                st.header("✅ Processamento Concluído!")
+                st.subheader("2.2 Resultado Final (Ordem ID + Anotações)")
                 
-                total_entradas = len(df_input)
-                total_agrupados = len(df_circuit)
+                # Exibe a tabela
+                st.dataframe(df_final_pos, use_container_width=True)
+
+                # Opção de Copiar para a Área de Transferência
+                csv_data = df_final_pos.to_csv(index=False, header=False, sep='\t')
                 
-                st.metric(
-                    label="Endereços Únicos Agrupados",
-                    value=total_agrupados,
-                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                st.markdown("### 2.3 Copiar para a Área de Transferência")
+                st.info("Para copiar para o Excel/Word/etc., selecione todo o texto abaixo (Ctrl+A) e pressione Ctrl+C.")
+                
+                st.text_area(
+                    "Conteúdo da Tabela (Separação por Tabulação):", 
+                    csv_data, 
+                    height=300
                 )
-                
-                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
-                st.subheader("3. Arquivo para Roteirização (Circuit)")
-                st.dataframe(df_circuit.head(5), use_container_width=True)
-                
-                # Download Circuit
-                buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
-                buffer_circuit.seek(0)
+
+                # Download como Excel
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
+                buffer.seek(0)
                 
                 st.download_button(
-                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
-                    data=buffer_circuit,
-                    file_name="Circuit_Import_FINAL.xlsx",
+                    label="📥 Baixar Lista Limpa (Excel)",
+                    data=buffer,
+                    file_name="Lista_Ordem_Impressao.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_excel_circuit"
+                    key="download_list"
                 )
 
-    except Exception as e:
-        st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao processar o arquivo. Erro: {e}")

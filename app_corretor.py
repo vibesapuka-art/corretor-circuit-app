@@ -17,7 +17,7 @@ st.markdown("""
 <style>
 .stTextArea [data-baseweb="base-input"] {
     text-align: left;
-    font-family: monospace; /* Fonte monoespaçada ajuda a garantir alinhamento visual */
+    font-family: monospace;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -60,7 +60,7 @@ def limpar_endereco(endereco):
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
     Função principal que aplica a correção e o agrupamento.
-    AGORA COM ORDENAÇÃO PELO MENOR NÚMERO DE SEQUÊNCIA ORIGINAL.
+    A coluna Sequence já estará ajustada com '*' se necessário.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
@@ -70,8 +70,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 
     df = df_entrada.copy()
     
-    # Garante que a coluna de sequência é numérica para a agregação 'min'
-    df[COLUNA_SEQUENCE] = pd.to_numeric(df[COLUNA_SEQUENCE], errors='coerce').fillna(0).astype(int)
+    # Cria uma coluna numérica temporária para a ordenação (ignorando o *)
+    # st.session_state['volumoso_ids'] é uma lista de IDs.
+    df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
+    df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(0).astype(int)
 
     # 1. Limpeza e Normalização (Fuzzy Matching)
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
@@ -112,20 +114,20 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
-        Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
+        # Agrupa as sequências (que já contêm o *)
+        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))), 
+        Total_Pacotes=('Sequence_Num', 'count'), # Usa a contagem da coluna numérica (ignora o *)
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
         Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0]),
         
-        # NOVO: Captura o menor número de sequência para ordenação
-        Min_Sequence=(COLUNA_SEQUENCE, 'min') 
+        # Captura o menor número de sequência original (sem *) para ordenação
+        Min_Sequence=('Sequence_Num', 'min') 
         
     ).reset_index()
 
-    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência
-    # Isso garante que a lista saia na ordem 1, 2, 3... dos pedidos originais.
+    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência.
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # 6. Formatação do DF para o CIRCUIT 
@@ -200,21 +202,14 @@ tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Rote
 
 with tab1:
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa corrige erros de digitação e agrupa pedidos no mesmo endereço.")
+    st.caption("Esta etapa corrige erros de digitação, marca volumes e agrupa pedidos.")
 
-    st.markdown("---")
-    st.subheader("Configurações:")
-    limite_similaridade_ajustado = st.slider(
-        'Ajuste a Precisão do Corretor (Fuzzy Matching):',
-        min_value=80,
-        max_value=100,
-        value=100, 
-        step=1,
-        help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
-    )
-    st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
-
-
+    # Inicializa o estado para armazenar o DataFrame e as ordens marcadas
+    if 'df_original' not in st.session_state:
+        st.session_state['df_original'] = None
+    if 'volumoso_ids' not in st.session_state:
+        st.session_state['volumoso_ids'] = []
+    
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
 
@@ -231,48 +226,115 @@ with tab1:
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
+            # --- VALIDAÇÃO DE COLUNAS ---
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
+            for col in colunas_essenciais:
+                 if col not in df_input_pre.columns:
+                     raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
+            
+            st.session_state['df_original'] = df_input_pre.copy()
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
-            st.markdown("---")
-            st.subheader("1.2 Processar")
-            
-            if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre"):
-                df_circuit = processar_e_corrigir_dados(df_input_pre, limite_similaridade_ajustado)
-                
-                if df_circuit is not None:
-                    st.markdown("---")
-                    st.header("✅ Resultado Concluído!")
-                    
-                    total_entradas = len(df_input_pre)
-                    total_agrupados = len(df_circuit)
-                    
-                    st.metric(
-                        label="Endereços Únicos Agrupados",
-                        value=total_agrupados,
-                        delta=f"-{total_entradas - total_agrupados} agrupados"
-                    )
-                    
-                    # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
-                    st.subheader("Arquivo para Roteirização (Circuit)")
-                    st.dataframe(df_circuit.head(5), use_container_width=True)
-                    
-                    # Download Circuit
-                    buffer_circuit = io.BytesIO()
-                    with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                        df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
-                    buffer_circuit.seek(0)
-                    
-                    st.download_button(
-                        label="📥 Baixar ARQUIVO PARA CIRCUIT",
-                        data=buffer_circuit,
-                        file_name="Circuit_Import_FINAL.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_excel_circuit"
-                    )
-
+        except KeyError as ke:
+             st.error(f"Erro de Coluna: {ke}")
+             st.session_state['df_original'] = None
         except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
+            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
 
+    
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+    
+    if st.session_state['df_original'] is not None:
+        
+        df_display = st.session_state['df_original'].copy()
+        df_display['Exibir'] = (
+            '#' + df_display[COLUNA_SEQUENCE].astype(str) + 
+            ' - ' + df_display[COLUNA_ENDERECO].astype(str)
+        )
+        
+        ordens_originais = df_display[COLUNA_SEQUENCE].unique()
+        
+        # A caixa de seleção de múltiplas escolhas permite ao usuário selecionar as ordens volumosas
+        st.session_state['volumoso_ids'] = st.multiselect(
+            'Selecione as Ordens de Serviço (do original) que são Volumosas (Serão marcadas com *):',
+            options=ordens_originais,
+            default=st.session_state['volumoso_ids'],
+            format_func=lambda x: df_display[df_display[COLUNA_SEQUENCE] == x]['Exibir'].iloc[0]
+        )
+        
+        st.markdown(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
+        st.caption("A ordem de exibição é apenas para facilitar a marcação.")
+        
+        st.markdown("---")
+        st.subheader("1.3 Configurar e Processar")
+        
+        limite_similaridade_ajustado = st.slider(
+            'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+            min_value=80,
+            max_value=100,
+            value=100, 
+            step=1,
+            help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
+        )
+        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
+        
+        
+        if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final"):
+            
+            # 1. Aplicar a marcação * no DF antes de processar
+            df_para_processar = st.session_state['df_original'].copy()
+            
+            # Converte a coluna para string para aplicar o *
+            df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
+            
+            for id_volumoso in st.session_state['volumoso_ids']:
+                # Encontra a linha da ordem e adiciona o *
+                df_para_processar.loc[
+                    df_para_processar[COLUNA_SEQUENCE] == str(id_volumoso), 
+                    COLUNA_SEQUENCE
+                ] = str(id_volumoso) + '*'
+
+            # 2. Iniciar o processamento e agrupamento
+            df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
+            
+            if df_circuit is not None:
+                st.markdown("---")
+                st.header("✅ Resultado Concluído!")
+                
+                total_entradas = len(st.session_state['df_original'])
+                total_agrupados = len(df_circuit)
+                
+                st.metric(
+                    label="Endereços Únicos Agrupados",
+                    value=total_agrupados,
+                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                )
+                
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                st.subheader("Arquivo para Roteirização (Circuit)")
+                st.dataframe(df_circuit, use_container_width=True)
+                
+                # Download Circuit
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                buffer_circuit.seek(0)
+                
+                st.download_button(
+                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    data=buffer_circuit,
+                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_circuit"
+                )
+
+    # Limpa a sessão se o arquivo for removido
+    elif uploaded_file_pre is None:
+        st.session_state['df_original'] = None
+        st.session_state['volumoso_ids'] = []
+        
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)

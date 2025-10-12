@@ -134,47 +134,42 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
-    """
-    # 1. Encontrar a coluna "Notes" (o nome pode variar)
-    coluna_notes = None
-    for col in df_input.columns:
-        if 'notes' in col.lower():
-            coluna_notes = col
-            break
     
-    if coluna_notes is None:
-        st.error("Erro: A coluna 'Notes' (Anotações) não foi encontrada no arquivo da rota.")
-        return None
+    NOTA: Esta função assume que as colunas de df_input JÁ FORAM PADRONIZADAS 
+    para minúsculas antes de serem passadas.
+    """
+    coluna_notes_lower = 'notes'
+    coluna_address_lower = 'address'
+
+    # 1. Verificar se as colunas essenciais existem (em minúsculas)
+    if coluna_notes_lower not in df_input.columns:
+        # Este erro é capturado e reformatado no bloco try/except da interface
+        raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
     df = df_input.copy()
-    df[coluna_notes] = df[coluna_notes].astype(str)
-    df = df.dropna(subset=[coluna_notes]) 
+    df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
+    df = df.dropna(subset=[coluna_notes_lower]) 
     
     # 2. Separar a coluna Notes: Parte antes do ';' é o Order ID
-    df[coluna_notes] = df[coluna_notes].str.strip('"')
+    df[coluna_notes_lower] = df[coluna_notes_lower].str.strip('"')
     
     # Divide a coluna na primeira ocorrência de ';'
-    df_split = df[coluna_notes].str.split(';', n=1, expand=True)
+    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
     df['Ordem ID'] = df_split[0].str.strip()
     df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
     
     
     # 3. Formatação Final da Tabela
     colunas_finais = ['Ordem ID']
-    coluna_endereco = None
     
-    # Inclui a coluna 'Address'
-    for col in df_input.columns:
-        if 'address' in col.lower():
-            colunas_finais.append(col) 
-            coluna_endereco = col
-            break
+    # Se a coluna de endereço existir, renomeie-a e inclua
+    if coluna_address_lower in df_input.columns:
+        df = df.rename(columns={coluna_address_lower: 'Endereço'})
+        colunas_finais.append('Endereço')
+    else:
+        st.warning("A coluna de Endereço não foi encontrada para inclusão na lista de impressão.")
     
     colunas_finais.append('Anotações Completas')
-    
-    # Renomeia o Address para 'Endereço'
-    if coluna_endereco:
-        df = df.rename(columns={coluna_endereco: 'Endereço'})
     
     df_final = df[colunas_finais]
     
@@ -187,7 +182,7 @@ def processar_rota_para_impressao(df_input):
 
 st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
 
-# CRIAÇÃO DAS ABAS (ESTA LINHA É ESSENCIAL!)
+# CRIAÇÃO DAS ABAS (ESSENCIAL PARA EVITAR NameError)
 tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
 
 
@@ -288,13 +283,14 @@ with tab2:
         key="file_pos"
     )
 
-    sheet_name = 'Table 3' # Valor padrão para o campo de texto
+    sheet_name_default = "Table 3" 
+    sheet_name = sheet_name_default
     
     # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
         sheet_name = st.text_input(
             "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value="Table 3" # Sugere o nome que você indicou
+            value=sheet_name_default
         )
 
     if uploaded_file_pos is not None:
@@ -302,9 +298,14 @@ with tab2:
             if uploaded_file_pos.name.endswith('.csv'):
                 df_input_pos = pd.read_csv(uploaded_file_pos)
             else:
-                # Agora usa o nome da aba fornecido pelo usuário (ou o default 'Table 3')
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
+            # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
+            # Converte todos os nomes de colunas para minúsculas e remove espaços extras
+            df_input_pos.columns = df_input_pos.columns.str.strip() 
+            df_input_pos.columns = df_input_pos.columns.str.lower()
+            # ---------------------------------------------------
+
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
             # Processa os dados
@@ -343,5 +344,13 @@ with tab2:
                     key="download_list"
                 )
 
+        except KeyError as ke:
+             # Captura erros de coluna ou aba
+            if "Table 3" in str(ke):
+                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
+            elif 'notes' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada após a padronização. Verifique se o arquivo da rota está correto.")
+            else:
+                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Certifique-se de que a aba **'{sheet_name}'** existe e que o formato do arquivo está correto. Erro: {e}")
+            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")

@@ -19,10 +19,7 @@ st.markdown("""
     text-align: left;
     font-family: monospace;
 }
-/* Estilo para alinhar os checkboxes na vertical */
-div[data-testid="stVerticalBlock"] > div {
-    gap: 0.5rem; /* Reduz o espaço entre os elementos na vertical */
-}
+/* Removendo a divisão em colunas para forçar 1, 2, 3... na vertical */
 </style>
 """, unsafe_allow_html=True)
 # --------------------------------------------------------------------------------------
@@ -120,9 +117,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         # Agrupa as sequências (que já contêm o *)
-        # NOTA: O sort na lambda é crucial para que, dentro do grupo, a ordem seja numérica (ex: 1,2,3*)
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
-        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), # Conta apenas os pacotes que eram numéricos
+        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
@@ -134,7 +130,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     ).reset_index()
 
     # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
-    # Filtra os valores infinitos (texto) para não atrapalhar a ordenação inicial
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # 6. Formatação do DF para o CIRCUIT 
@@ -215,7 +210,7 @@ with tab1:
     if 'df_original' not in st.session_state:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
-        st.session_state['volumoso_ids'] = set() # Usar set para eficiência
+        st.session_state['volumoso_ids'] = set() 
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -261,8 +256,9 @@ with tab1:
     
     if st.session_state['df_original'] is not None:
         
-        # --- CORREÇÃO DA ORDEM DE EXIBIÇÃO: ORDENAÇÃO NUMÉRICA FORÇADA ---
+        # --- ORDENAÇÃO NUMÉRICA FORÇADA (Para exibir corretamente 1, 2, 3...) ---
         df_temp = st.session_state['df_original'].copy()
+        # Converte para numérico, usando a função customizada para tratar erros
         df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
         
         # Lista as ordens únicas e classifica pela coluna numérica temporária
@@ -277,27 +273,23 @@ with tab1:
             elif order_id in st.session_state['volumoso_ids']:
                 st.session_state['volumoso_ids'].remove(order_id)
 
-        # Usar colunas para dispor os checkboxes em uma grade
-        
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
 
         # Container para os checkboxes
         with st.container():
              # Loop para criar os checkboxes
-            cols = st.columns(5) # 5 colunas para caber mais na tela
-            for i, order_id in enumerate(ordens_originais_sorted):
-                col = cols[i % 5] # Alterna entre as 5 colunas
+            
+            # --- MUDANÇA PRINCIPAL: CRIAR UMA COLUNA POR LINHA (1 na vertical) ---
+            for order_id in ordens_originais_sorted:
+                col = st.columns(1)[0] # Força uma única coluna para o checkbox
                 
-                # Estado inicial do checkbox (checa se o ID está no set)
                 is_checked = order_id in st.session_state['volumoso_ids']
                 
-                # Cria o checkbox com uma chave única e a ação de callback
                 col.checkbox(
                     str(order_id), 
                     value=is_checked, 
                     key=f"vol_{order_id}",
                     on_change=update_volumoso_ids, 
-                    # args: o primeiro é o ID, o segundo é o NOVO estado do checkbox
                     args=(order_id, not is_checked) 
                 )
 

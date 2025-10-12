@@ -7,7 +7,7 @@ import os
 
 # --- Configurações da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Final)",
+    page_title="Corretor de Endereços Circuit (Finalizado)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,20 +20,23 @@ COLUNA_LONGITUDE = 'Longitude'
 
 
 def limpar_endereco(endereco):
-    """Normaliza o texto do endereço para melhor comparação, MANTENDO O NÚMERO E VÍRGULAS."""
+    """
+    Normaliza o texto do endereço para melhor comparação.
+    MANTÉM NÚMEROS e VÍRGULAS (,) para que endereços com números diferentes
+    não sejam agrupados, mesmo que o nome da rua seja o mesmo.
+    """
     if pd.isna(endereco):
         return ""
     endereco = str(endereco).lower().strip()
     
-    # 1. A ÚNICA MUDANÇA: remover caracteres que NÃO são alfanuméricos (\w), espaço (\s) OU VÍRGULA (,)
-    # Isso torna a diferença de número (ex: 100 vs 101) mais significativa no score final,
-    # forçando o agrupamento a diferenciar endereços por número.
+    # Remove caracteres que NÃO são alfanuméricos (\w), espaço (\s) OU VÍRGULA (,)
+    # Manter a vírgula força a diferença de número a ter mais peso.
     endereco = re.sub(r'[^\w\s,]', '', endereco) 
     
-    # 2. Substitui múltiplos espaços por um único
+    # Substitui múltiplos espaços por um único
     endereco = re.sub(r'\s+', ' ', endereco)
     
-    # 3. Substitui abreviações comuns
+    # Substitui abreviações comuns para padronização
     endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
     
     return endereco
@@ -106,6 +109,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     ).reset_index()
 
     # 5. Formatação do DF para o CIRCUIT (USANDO LAT/LON ORIGINAIS)
+    
+    # O Endereço para o Circuit precisa do Bairro para ser completo
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado']
@@ -119,8 +124,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
-        'Latitude': df_agrupado['Latitude'],  # <--- COORDENADA ORIGINAL
-        'Longitude': df_agrupado['Longitude'], # <--- COORDENADA ORIGINAL
+        'Latitude': df_agrupado['Latitude'], 
+        'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas
     })
 
@@ -149,11 +154,11 @@ limite_similaridade_ajustado = st.sidebar.slider(
     'Ajuste a Precisão do Corretor (Fuzzy Matching):',
     min_value=80,
     max_value=100,
-    value=90,
+    value=90, # Manter o default em 90, mas instruir o usuário a subir
     step=1,
-    help="Valores maiores (ex: 95) agrupam apenas endereços quase idênticos."
+    help="Valores maiores (ex: 98) agrupam apenas endereços quase idênticos, resolvendo o problema de números diferentes na mesma rua."
 )
-st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**. Se tiver agrupamento errado, aumente este valor para 95% ou mais.")
+st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**. Para evitar agrupamento errado na mesma rua, ajuste para **98%**.")
 
 
 # --- CORPO PRINCIPAL DO APP ---
@@ -235,4 +240,3 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
-

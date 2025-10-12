@@ -7,7 +7,7 @@ import os
 
 # --- Configurações da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Finalizado)",
+    page_title="Corretor de Endereços Circuit (Final)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,13 +20,22 @@ COLUNA_LONGITUDE = 'Longitude'
 
 
 def limpar_endereco(endereco):
-    """Normaliza o texto do endereço para melhor comparação."""
+    """Normaliza o texto do endereço para melhor comparação, MANTENDO O NÚMERO E VÍRGULAS."""
     if pd.isna(endereco):
         return ""
     endereco = str(endereco).lower().strip()
-    endereco = re.sub(r'[^\w\s]', '', endereco)
+    
+    # 1. A ÚNICA MUDANÇA: remover caracteres que NÃO são alfanuméricos (\w), espaço (\s) OU VÍRGULA (,)
+    # Isso torna a diferença de número (ex: 100 vs 101) mais significativa no score final,
+    # forçando o agrupamento a diferenciar endereços por número.
+    endereco = re.sub(r'[^\w\s,]', '', endereco) 
+    
+    # 2. Substitui múltiplos espaços por um único
     endereco = re.sub(r'\s+', ' ', endereco)
+    
+    # 3. Substitui abreviações comuns
     endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
+    
     return endereco
 
 
@@ -65,6 +74,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
+            # Usa o Endereço original mais frequente como Endereço Oficial
             endereco_oficial_original = df_grupo[COLUNA_ENDERECO].mode()[0]
             
             for end_similar in grupo_matches:
@@ -78,7 +88,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 3. Aplicação do Endereço Corrigido
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
 
-    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE - MELHOR AGRUPAMENTO)
+    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE)
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
@@ -134,7 +144,7 @@ st.title("🗺️ Corretor de Endereços para Circuit (Final)")
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.header("⚙️ Configurações de Correção")
 
-# Slider de Similaridade (O ÚNICO SLIDER RESTANTE)
+# Slider de Similaridade 
 limite_similaridade_ajustado = st.sidebar.slider(
     'Ajuste a Precisão do Corretor (Fuzzy Matching):',
     min_value=80,
@@ -143,7 +153,7 @@ limite_similaridade_ajustado = st.sidebar.slider(
     step=1,
     help="Valores maiores (ex: 95) agrupam apenas endereços quase idênticos."
 )
-st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**.")
+st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**. Se tiver agrupamento errado, aumente este valor para 95% ou mais.")
 
 
 # --- CORPO PRINCIPAL DO APP ---
@@ -199,7 +209,7 @@ if uploaded_file is not None:
                 st.download_button(
                     label="📥 Baixar ARQUIVO PARA CIRCUIT",
                     data=buffer_circuit,
-                    file_name="Circuit_Import_ORIGINAL.xlsx",
+                    file_name="Circuit_Import_FINAL.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )
@@ -225,3 +235,11 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
+
+### 🚀 Próximos Passos
+
+1.  **Atualize seu `app_corretor.py`** com o código acima.
+2.  **Faça o deploy** no Streamlit Cloud.
+3.  **Teste a Planilha:**
+    * **Primeiro teste:** Tente rodar o processamento com o slider em **90%** (valor padrão). Se o problema de agrupamento incorreto for resolvido, ótimo.
+    * **Segundo teste (Se o problema persistir):** Suba o slider para **95%**. Isso fará com que o agrupamento seja muito mais rigoroso, garantindo que a diferença no número da casa impeça a junção.

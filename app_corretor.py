@@ -13,8 +13,6 @@ st.set_page_config(
 )
 
 # --- CSS para alinhar texto à esquerda (Corrige a centralização do Streamlit) ---
-# O Text Area (st.text_area) no Streamlit tem um problema de alinhamento em alguns setups. 
-# Este CSS corrige isso forçando o alinhamento do texto à esquerda.
 st.markdown("""
 <style>
 .stTextArea [data-baseweb="base-input"] {
@@ -62,6 +60,7 @@ def limpar_endereco(endereco):
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
     Função principal que aplica a correção e o agrupamento.
+    AGORA COM ORDENAÇÃO PELO MENOR NÚMERO DE SEQUÊNCIA ORIGINAL.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
@@ -70,6 +69,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             return None
 
     df = df_entrada.copy()
+    
+    # Garante que a coluna de sequência é numérica para a agregação 'min'
+    df[COLUNA_SEQUENCE] = pd.to_numeric(df[COLUNA_SEQUENCE], errors='coerce').fillna(0).astype(int)
 
     # 1. Limpeza e Normalização (Fuzzy Matching)
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
@@ -115,11 +117,18 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
-        Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0])
+        Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0]),
+        
+        # NOVO: Captura o menor número de sequência para ordenação
+        Min_Sequence=(COLUNA_SEQUENCE, 'min') 
         
     ).reset_index()
 
-    # 5. Formatação do DF para o CIRCUIT 
+    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência
+    # Isso garante que a lista saia na ordem 1, 2, 3... dos pedidos originais.
+    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
+    
+    # 6. Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado']
@@ -148,13 +157,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
-    
-    NOTA: Esta função assume que as colunas de df_input JÁ FORAM PADRONIZADAS 
-    para minúsculas antes de serem passadas.
     """
     coluna_notes_lower = 'notes'
     
-    # 1. Verificar se a coluna essencial 'notes' existe (em minúsculas)
     if coluna_notes_lower not in df_input.columns:
         raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
@@ -185,7 +190,7 @@ def processar_rota_para_impressao(df_input):
 
 st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
 
-# CRIAÇÃO DAS ABAS (CORRIGIDO)
+# CRIAÇÃO DAS ABAS 
 tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
 
 

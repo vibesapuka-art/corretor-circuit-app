@@ -12,6 +12,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# --- CSS para alinhar texto à esquerda (Fixa o problema de centralização do Streamlit) ---
+st.markdown("""
+<style>
+.stTextArea [data-baseweb="base-input"] {
+    text-align: left;
+}
+</style>
+""", unsafe_allow_html=True)
+# --------------------------------------------------------------------------------------
+
+
 # --- Configurações Globais (Colunas) ---
 COLUNA_ENDERECO = 'Destination Address'
 COLUNA_SEQUENCE = 'Sequence'
@@ -142,7 +153,6 @@ def processar_rota_para_impressao(df_input):
     
     # 1. Verificar se a coluna essencial 'notes' existe (em minúsculas)
     if coluna_notes_lower not in df_input.columns:
-        # Erro é capturado e reformatado no bloco try/except da interface
         raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
     df = df_input.copy()
@@ -286,14 +296,11 @@ with tab2:
     if uploaded_file_pos is not None:
         try:
             if uploaded_file_pos.name.endswith('.csv'):
-                # Tenta CSV
                 df_input_pos = pd.read_csv(uploaded_file_pos)
             else:
-                # Tenta Excel com o nome da aba
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
             # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
-            # Converte todos os nomes de colunas para minúsculas e remove espaços extras
             df_input_pos.columns = df_input_pos.columns.str.strip() 
             df_input_pos.columns = df_input_pos.columns.str.lower()
             # ---------------------------------------------------
@@ -324,8 +331,18 @@ with tab2:
                 copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False)
                 
                 st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
-                st.info("Para copiar para o Excel/Word/etc., selecione todo o texto abaixo (Ctrl+A) e pressione Ctrl+C.")
                 
+                # Botão de Copiar
+                st.button(
+                    label="📋 Copiar Lista de Impressão",
+                    data=copia_data,
+                    key="copy_button",
+                    type="primary",
+                )
+
+                st.info("O botão acima copia o texto. O campo abaixo é apenas para visualização e verificação do alinhamento.")
+                
+                # Área de texto para visualização
                 st.text_area(
                     "Conteúdo da Lista de Impressão (ID - Anotações):", 
                     copia_data, 
@@ -334,7 +351,6 @@ with tab2:
 
                 # Download como Excel (mantém o formato tabulado, caso o usuário queira importar)
                 buffer = io.BytesIO()
-                # A versão para download em Excel terá as duas colunas separadas.
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df_final_pos[['Ordem ID', 'Anotações Completas']].to_excel(writer, index=False, sheet_name='Lista Impressao')
                 buffer.seek(0)

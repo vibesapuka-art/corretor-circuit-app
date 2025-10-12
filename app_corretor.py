@@ -7,7 +7,7 @@ import os
 
 # --- Configurações da Página ---
 st.set_page_config(
-    page_title="Corretor de Endereços Circuit (Finalizado)",
+    page_title="Corretor de Endereços Circuit (Apenas Import)",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -23,14 +23,13 @@ def limpar_endereco(endereco):
     """
     Normaliza o texto do endereço para melhor comparação.
     MANTÉM NÚMEROS e VÍRGULAS (,) para que endereços com números diferentes
-    não sejam agrupados, mesmo que o nome da rua seja o mesmo.
+    não sejam agrupados.
     """
     if pd.isna(endereco):
         return ""
     endereco = str(endereco).lower().strip()
     
     # Remove caracteres que NÃO são alfanuméricos (\w), espaço (\s) OU VÍRGULA (,)
-    # Manter a vírgula força a diferença de número a ter mais peso.
     endereco = re.sub(r'[^\w\s,]', '', endereco) 
     
     # Substitui múltiplos espaços por um único
@@ -51,7 +50,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
             st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
-            return None, None
+            return None
 
     df = df_entrada.copy()
 
@@ -77,7 +76,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            # Usa o Endereço original mais frequente como Endereço Oficial
             endereco_oficial_original = df_grupo[COLUNA_ENDERECO].mode()[0]
             
             for end_similar in grupo_matches:
@@ -97,20 +95,14 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
         Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
-        
-        # USA AS LATITUDE E LONGITUDE ORIGINAIS DO PRIMEIRO PEDIDO DO GRUPO
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
-        
-        # Mantemos o Bairro e Zipcode mais frequentes para o resultado final
         Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
         Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0])
         
     ).reset_index()
 
-    # 5. Formatação do DF para o CIRCUIT (USANDO LAT/LON ORIGINAIS)
-    
-    # O Endereço para o Circuit precisa do Bairro para ser completo
+    # 5. Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado']
@@ -128,46 +120,34 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas
     })
-
-    # 6. Formatação do DF para IMPRESSÃO (3 COLUNAS)
-    ordem_id_impressao = df_agrupado['Sequences_Agrupadas']
-    separador = pd.Series(['-'] * len(df_agrupado))
-    endereco_imprimir_simples = df_agrupado['Endereco_Corrigido']
     
-    df_impressao = pd.DataFrame({
-        'Ordem ID': ordem_id_impressao,
-        'Separador': separador,
-        'Endereco_Simples': endereco_imprimir_simples
-    })
-    
-    return df_circuit, df_impressao
+    return df_circuit
 
 # --- Interface Streamlit ---
 
-st.title("🗺️ Corretor de Endereços para Circuit (Final)")
+st.title("🗺️ Corretor de Endereços para Circuit (Apenas Import)")
 
 # --- BARRA LATERAL (SIDEBAR) ---
 st.sidebar.header("⚙️ Configurações de Correção")
 
-# Slider de Similaridade 
 limite_similaridade_ajustado = st.sidebar.slider(
     'Ajuste a Precisão do Corretor (Fuzzy Matching):',
     min_value=80,
     max_value=100,
-    value=90, # Manter o default em 90, mas instruir o usuário a subir
+    value=90, 
     step=1,
-    help="Valores maiores (ex: 98) agrupam apenas endereços quase idênticos, resolvendo o problema de números diferentes na mesma rua."
+    help="Use 100% para evitar que endereços na mesma rua, mas com números diferentes, sejam agrupados."
 )
-st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**. Para evitar agrupamento errado na mesma rua, ajuste para **98%**.")
+st.sidebar.info(f"O limite de similaridade é **{limite_similaridade_ajustado}%**.")
 
 
 # --- CORPO PRINCIPAL DO APP ---
 
 st.markdown("---")
-st.subheader("1. Carregar Planilha")
+st.subheader("1. Carregar Planilha Original")
 
 uploaded_file = st.file_uploader(
-    "Arraste e solte o arquivo aqui:", 
+    "Arraste e solte o arquivo original aqui:", 
     type=['csv', 'xlsx']
 )
 
@@ -181,11 +161,10 @@ if uploaded_file is not None:
         st.success(f"Arquivo '{uploaded_file.name}' carregado! Total de **{len(df_input)}** registros.")
         
         st.markdown("---")
-        st.subheader("2. Corrigir e Gerar Arquivos")
+        st.subheader("2. Gerar Arquivo de Roteirização")
         
         if st.button("🚀 Iniciar Corretor e Agrupamento"):
-            # Chama a função principal
-            df_circuit, df_impressao = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
+            df_circuit = processar_e_corrigir_dados(df_input, limite_similaridade_ajustado)
             
             if df_circuit is not None:
                 st.markdown("---")
@@ -201,8 +180,7 @@ if uploaded_file is not None:
                 )
                 
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
-                st.subheader("3A. Arquivo para Roteirização (Circuit)")
-                st.caption("Contém as coordenadas **originais** da sua planilha de entrada.")
+                st.subheader("3. Arquivo para Roteirização (Circuit)")
                 st.dataframe(df_circuit.head(5), use_container_width=True)
                 
                 # Download Circuit
@@ -217,25 +195,6 @@ if uploaded_file is not None:
                     file_name="Circuit_Import_FINAL.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
-                )
-                
-                # --- SAÍDA PARA IMPRESSÃO (LISTA DE 3 COLUNAS) ---
-                st.markdown("---")
-                st.subheader("3B. Arquivo para Impressão (3 Colunas Separadas)")
-                st.dataframe(df_impressao.head(5), use_container_width=True)
-                
-                # Download Impressão
-                buffer_impressao = io.BytesIO()
-                with pd.ExcelWriter(buffer_impressao, engine='openpyxl') as writer:
-                    df_impressao.to_excel(writer, index=False, sheet_name='Lista 3 Colunas')
-                buffer_impressao.seek(0)
-                
-                st.download_button(
-                    label="📄 Baixar ARQUIVO PARA IMPRESSÃO",
-                    data=buffer_impressao,
-                    file_name="Lista_Impressao_3Colunas.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_excel_print"
                 )
 
     except Exception as e:

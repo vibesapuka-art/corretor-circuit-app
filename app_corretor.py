@@ -13,10 +13,13 @@ st.set_page_config(
 )
 
 # --- CSS para alinhar texto à esquerda (Corrige a centralização do Streamlit) ---
+# O Text Area (st.text_area) no Streamlit tem um problema de alinhamento em alguns setups. 
+# Este CSS corrige isso forçando o alinhamento do texto à esquerda.
 st.markdown("""
 <style>
 .stTextArea [data-baseweb="base-input"] {
     text-align: left;
+    font-family: monospace; /* Fonte monoespaçada ajuda a garantir alinhamento visual */
 }
 </style>
 """, unsafe_allow_html=True)
@@ -182,7 +185,7 @@ def processar_rota_para_impressao(df_input):
 
 st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
 
-# CRIAÇÃO DAS ABAS (ESSENCIAL PARA EVITAR NameError)
+# CRIAÇÃO DAS ABAS (CORRIGIDO)
 tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
 
 
@@ -332,22 +335,16 @@ with tab2:
                 
                 st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
                 
-                # Botão de Copiar (CORRIGIDO com st.clipboard)
-                st.clipboard(
-                    label="📋 Copiar Lista de Impressão",
-                    text=copia_data,
-                )
-
-                st.info("O botão acima copia o texto automaticamente. O campo abaixo é apenas para visualização e verificação do alinhamento.")
+                st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
                 
-                # Área de texto para visualização
+                # Área de texto para visualização e cópia
                 st.text_area(
-                    "Conteúdo da Lista de Impressão (ID - Anotações):", 
+                    "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
                     copia_data, 
                     height=300
                 )
 
-                # Download como Excel (mantém o formato tabulado, caso o usuário queira importar)
+                # Download como Excel 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     df_final_pos[['Ordem ID', 'Anotações Completas']].to_excel(writer, index=False, sheet_name='Lista Impressao')

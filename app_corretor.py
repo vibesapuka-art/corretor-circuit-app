@@ -236,10 +236,3 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"Ocorreu um erro ao processar o arquivo. Verifique o formato e as colunas. Erro: {e}")
 
-### 🚀 Próximos Passos
-
-1.  **Atualize seu `app_corretor.py`** com o código acima.
-2.  **Faça o deploy** no Streamlit Cloud.
-3.  **Teste a Planilha:**
-    * **Primeiro teste:** Tente rodar o processamento com o slider em **90%** (valor padrão). Se o problema de agrupamento incorreto for resolvido, ótimo.
-    * **Segundo teste (Se o problema persistir):** Suba o slider para **95%**. Isso fará com que o agrupamento seja muito mais rigoroso, garantindo que a diferença no número da casa impeça a junção.

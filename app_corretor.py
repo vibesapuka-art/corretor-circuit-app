@@ -28,6 +28,7 @@ div.stTextArea > label {
 div[data-testid="stTextarea"] textarea {
     text-align: left !important; /* Conteúdo do text area */
     font-family: monospace;
+    white-space: pre-wrap; /* Garante quebras de linha corretas */
 }
 /* Alinha os títulos e outros elementos em geral */
 h1, h2, h3, h4, .stMarkdown {
@@ -80,7 +81,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
-            # ERRO DE SINTAXE CORRIGIDO AQUI: F-string fechado corretamente na mesma linha
             st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
             return None
 
@@ -196,9 +196,15 @@ def processar_rota_para_impressao(df_input):
     
     
     # 3. Formatação Final da Tabela (APENAS ID e ANOTAÇÕES)
-    colunas_finais = ['Ordem ID', 'Anotações Completas']
+    # GERAÇÃO DA COLUNA ÚNICA FORMATADA PARA CÓPIA/EXCEL
+    df['Lista de Impressão'] = (
+        df['Ordem ID'].astype(str) + 
+        ' - ' + 
+        df['Anotações Completas'].astype(str)
+    )
     
-    df_final = df[colunas_finais]
+    # Apenas retorna a coluna formatada
+    df_final = df[['Lista de Impressão']]
     
     return df_final
 
@@ -427,25 +433,18 @@ with tab2:
             
             if df_final_pos is not None and not df_final_pos.empty:
                 st.markdown("---")
-                st.subheader("2.2 Resultado Final (Ordem ID e Anotações)")
-                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto para cópia rápida.")
+                st.subheader("2.2 Resultado Final (Lista de Impressão)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
-                # Exibe a tabela
+                # Exibe a tabela (agora com apenas uma coluna formatada)
                 st.dataframe(df_final_pos, use_container_width=True)
 
-                # --- LÓGICA DE COPIA PERSONALIZADA (ID - ANOTAÇÕES) ---
+                # --- LÓGICA DE COPIA PARA TEXT AREA ---
                 
-                # Combina as duas colunas com o separador " - "
-                df_final_pos['Linha Impressão'] = (
-                    df_final_pos['Ordem ID'].astype(str) + 
-                    ' - ' + 
-                    df_final_pos['Anotações Completas'].astype(str)
-                )
+                # Converte para string sem cabeçalho e sem índice. O CSS forçará o alinhamento.
+                copia_data = df_final_pos['Lista de Impressão'].to_string(index=False, header=False) 
                 
-                # Converte para string sem cabeçalho e sem índice. O CSS já forçará o alinhamento.
-                copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False) 
-                
-                st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
+                st.markdown("### 2.3 Copiar para a Área de Transferência")
                 
                 st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
                 
@@ -456,17 +455,19 @@ with tab2:
                     height=300
                 )
 
-                # Download como Excel 
+                # --- EXPORTAÇÃO PARA EXCEL COM COLUNA ÚNICA FORMATADA ---
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_final_pos[['Ordem ID', 'Anotações Completas']].to_excel(writer, index=False, sheet_name='Lista Impressao')
+                    # Exporta APENAS a coluna formatada 'Lista de Impressão'
+                    df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
                 buffer.seek(0)
                 
                 st.download_button(
-                    label="📥 Baixar Lista Limpa (Excel)",
+                    label="📥 Baixar Lista Limpa (Excel) - Coluna Única",
                     data=buffer,
-                    file_name="Lista_Ordem_Impressao.xlsx",
+                    file_name="Lista_Ordem_Impressao_UNICA.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    help="Baixe este arquivo e copie o conteúdo da única coluna para garantir o alinhamento esquerdo no Excel/Word.",
                     key="download_list"
                 )
 

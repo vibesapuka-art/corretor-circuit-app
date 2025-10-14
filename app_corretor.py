@@ -12,14 +12,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS para alinhar texto à esquerda (Corrige a centralização do Streamlit) ---
+# --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
 st.markdown("""
 <style>
+/* Alinha o texto de entrada na caixa de texto (útil para formulários) */
 .stTextArea [data-baseweb="base-input"] {
     text-align: left;
     font-family: monospace;
 }
-/* Removendo a divisão em colunas para forçar 1, 2, 3... na vertical */
+/* *** NOVO CSS: Garante que o texto exibido para cópia (st.text_area) seja alinhado à esquerda *** */
+.stTextArea p {
+    text-align: left !important;
+    white-space: pre-wrap !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 # --------------------------------------------------------------------------------------
@@ -256,9 +262,8 @@ with tab1:
     
     if st.session_state['df_original'] is not None:
         
-        # --- ORDENAÇÃO NUMÉRICA FORÇADA (Para exibir corretamente 1, 2, 3...) ---
+        # --- ORDENAÇÃO NUMÉRICA FORÇADA ---
         df_temp = st.session_state['df_original'].copy()
-        # Converte para numérico, usando a função customizada para tratar erros
         df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
         
         # Lista as ordens únicas e classifica pela coluna numérica temporária
@@ -277,15 +282,12 @@ with tab1:
 
         # Container para os checkboxes
         with st.container():
-             # Loop para criar os checkboxes
-            
-            # --- MUDANÇA PRINCIPAL: CRIAR UMA COLUNA POR LINHA (1 na vertical) ---
+             # Itera pela lista ordenada e exibe um checkbox por linha (Ordem 1, 2, 3...)
             for order_id in ordens_originais_sorted:
-                col = st.columns(1)[0] # Força uma única coluna para o checkbox
                 
                 is_checked = order_id in st.session_state['volumoso_ids']
                 
-                col.checkbox(
+                st.checkbox(
                     str(order_id), 
                     value=is_checked, 
                     key=f"vol_{order_id}",

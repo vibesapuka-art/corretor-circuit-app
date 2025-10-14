@@ -258,4 +258,151 @@ with tab1:
             # Resetar as marcações se um novo arquivo for carregado
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
-                 st.session_state['last_uploaded_
+                 st.session_state['last_uploaded_name'] = uploaded_file_pre.name
+
+
+            st.session_state['df_original'] = df_input_pre.copy()
+            st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
+            
+        except KeyError as ke:
+             st.error(f"Erro de Coluna: {ke}")
+             st.session_state['df_original'] = None
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
+
+    
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+    
+    if st.session_state['df_original'] is not None:
+        
+        # --- ORDENAÇÃO NUMÉRICA FORÇADA ---
+        df_temp = st.session_state['df_original'].copy()
+        df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
+        
+        # Lista as ordens únicas e classifica pela coluna numérica temporária
+        ordens_originais_sorted = df_temp.sort_values('Order_Num')[COLUNA_SEQUENCE].astype(str).unique()
+        # ----------------------------------------------------------------
+        
+        
+        # Função de callback para atualizar o set de IDs volumosos
+        def update_volumoso_ids(order_id, is_checked):
+            if is_checked:
+                st.session_state['volumoso_ids'].add(order_id)
+            elif order_id in st.session_state['volumoso_ids']:
+                st.session_state['volumoso_ids'].remove(order_id)
+
+        st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
+
+        # Container para os checkboxes
+        with st.container():
+             # Itera pela lista ordenada e exibe um checkbox por linha (Ordem 1, 2, 3...)
+            for order_id in ordens_originais_sorted:
+                
+                is_checked = order_id in st.session_state['volumoso_ids']
+                
+                st.checkbox(
+                    str(order_id), 
+                    value=is_checked, 
+                    key=f"vol_{order_id}",
+                    on_change=update_volumoso_ids, 
+                    args=(order_id, not is_checked) 
+                )
+
+
+        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
+        
+        st.markdown("---")
+        st.subheader("1.3 Configurar e Processar")
+        
+        limite_similaridade_ajustado = st.slider(
+            'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+            min_value=80,
+            max_value=100,
+            value=100, 
+            step=1,
+            help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
+        )
+        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
+        
+        
+        if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final"):
+            
+            # 1. Aplicar a marcação * no DF antes de processar
+            df_para_processar = st.session_state['df_original'].copy()
+            
+            # Garante que a coluna Sequence seja string para manipulação
+            df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
+            
+            # Aplica o * nos IDs que estão no set
+            for id_volumoso in st.session_state['volumoso_ids']:
+                str_id_volumoso = str(id_volumoso)
+                
+                # Filtra a coluna Sequence para garantir que apenas o ID exato seja marcado
+                df_para_processar.loc[
+                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                    COLUNA_SEQUENCE
+                ] = str_id_volumoso + '*'
+
+            # 2. Iniciar o processamento e agrupamento
+            df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
+            
+            if df_circuit is not None:
+                st.markdown("---")
+                st.header("✅ Resultado Concluído!")
+                
+                total_entradas = len(st.session_state['df_original'])
+                total_agrupados = len(df_circuit)
+                
+                st.metric(
+                    label="Endereços Únicos Agrupados",
+                    value=total_agrupados,
+                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                )
+                
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                st.subheader("Arquivo para Roteirização (Circuit)")
+                st.dataframe(df_circuit, use_container_width=True)
+                
+                # Download Circuit
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                buffer_circuit.seek(0)
+                
+                st.download_button(
+                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    data=buffer_circuit,
+                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_circuit"
+                )
+
+    # Limpa a sessão se o arquivo for removido
+    elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
+        st.session_state['df_original'] = None
+        st.session_state['volumoso_ids'] = set()
+        st.session_state['last_uploaded_name'] = None
+        st.rerun() 
+
+
+# ----------------------------------------------------------------------------------
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ----------------------------------------------------------------------------------
+
+with tab2:
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+
+    st.markdown("---")
+    st.subheader("2.1 Carregar Arquivo da Rota")
+
+    uploaded_file_pos = st.file_uploader(
+        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="file_pos"
+    )
+
+    sheet_name_default = "Table 3" 
+    sheet_name = sheet

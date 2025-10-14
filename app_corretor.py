@@ -20,10 +20,17 @@ st.markdown("""
     text-align: left;
     font-family: monospace;
 }
-/* *** NOVO CSS: Garante que o texto exibido para cópia (st.text_area) seja alinhado à esquerda *** */
-.stTextArea p {
+/* *** NOVO CSS FORTE: Garante que o texto exibido para cópia (st.text_area) seja alinhado à esquerda *** */
+div.stTextArea > label {
+    text-align: left !important; /* Título do text area */
+}
+div[data-testid="stTextarea"] textarea {
+    text-align: left !important; /* Conteúdo do text area */
+    font-family: monospace;
+}
+/* Alinha os títulos e outros elementos em geral */
+h1, h2, h3, h4, .stMarkdown {
     text-align: left !important;
-    white-space: pre-wrap !important;
 }
 
 </style>
@@ -426,15 +433,17 @@ with tab2:
 
                 # --- LÓGICA DE COPIA PERSONALIZADA (ID - ANOTAÇÕES) ---
                 
-                # Combina as duas colunas com o separador " - "
+                # Combina as duas colunas com o separador " - " e quebra de linha
+                # O to_string(index=False, header=False) já faz a quebra de linha.
                 df_final_pos['Linha Impressão'] = (
                     df_final_pos['Ordem ID'].astype(str) + 
                     ' - ' + 
                     df_final_pos['Anotações Completas'].astype(str)
                 )
                 
-                # Converte para string sem cabeçalho e sem índice, com quebras de linha
-                copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False)
+                # O uso de 'sep' como um único espaço em to_string() evita o alinhamento
+                # padrão à direita que ocorre quando a largura da coluna é variável.
+                copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False, justify='left')
                 
                 st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
                 

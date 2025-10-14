@@ -20,7 +20,7 @@ st.markdown("""
     text-align: left;
     font-family: monospace;
 }
-/* *** NOVO CSS FORTE: Garante que o texto exibido para cópia (st.text_area) seja alinhado à esquerda *** */
+/* *** CSS FORTE: Garante que o conteúdo e o título do st.text_area sejam alinhados à esquerda *** */
 div.stTextArea > label {
     text-align: left !important; /* Título do text area */
 }
@@ -201,7 +201,7 @@ def processar_rota_para_impressao(df_input):
     return df_final
 
 
-# ===============================================
+# =LECTIONs
 # INTERFACE PRINCIPAL
 # ===============================================
 
@@ -402,81 +402,4 @@ with tab2:
     # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
         sheet_name = st.text_input(
-            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=sheet_name_default
-        )
-
-    if uploaded_file_pos is not None:
-        try:
-            if uploaded_file_pos.name.endswith('.csv'):
-                df_input_pos = pd.read_csv(uploaded_file_pos)
-            else:
-                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
-            
-            # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
-            df_input_pos.columns = df_input_pos.columns.str.strip() 
-            df_input_pos.columns = df_input_pos.columns.str.lower()
-            # ---------------------------------------------------
-
-            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
-            
-            # Processa os dados
-            df_final_pos = processar_rota_para_impressao(df_input_pos)
-            
-            if df_final_pos is not None and not df_final_pos.empty:
-                st.markdown("---")
-                st.subheader("2.2 Resultado Final (Ordem ID e Anotações)")
-                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto para cópia rápida.")
-                
-                # Exibe a tabela
-                st.dataframe(df_final_pos, use_container_width=True)
-
-                # --- LÓGICA DE COPIA PERSONALIZADA (ID - ANOTAÇÕES) ---
-                
-                # Combina as duas colunas com o separador " - " e quebra de linha
-                # O to_string(index=False, header=False) já faz a quebra de linha.
-                df_final_pos['Linha Impressão'] = (
-                    df_final_pos['Ordem ID'].astype(str) + 
-                    ' - ' + 
-                    df_final_pos['Anotações Completas'].astype(str)
-                )
-                
-                # O uso de 'sep' como um único espaço em to_string() evita o alinhamento
-                # padrão à direita que ocorre quando a largura da coluna é variável.
-                copia_data = df_final_pos['Linha Impressão'].to_string(index=False, header=False, justify='left')
-                
-                st.markdown("### 2.3 Copiar para a Área de Transferência (ID - Anotações)")
-                
-                st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
-                
-                # Área de texto para visualização e cópia
-                st.text_area(
-                    "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
-                    copia_data, 
-                    height=300
-                )
-
-                # Download como Excel 
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_final_pos[['Ordem ID', 'Anotações Completas']].to_excel(writer, index=False, sheet_name='Lista Impressao')
-                buffer.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar Lista Limpa (Excel)",
-                    data=buffer,
-                    file_name="Lista_Ordem_Impressao.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_list"
-                )
-
-        except KeyError as ke:
-             # Captura erros de coluna ou aba
-            if "Table 3" in str(ke):
-                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
-            elif 'notes' in str(ke):
-                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
-            else:
-                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
-        except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
+            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):",

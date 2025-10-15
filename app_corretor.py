@@ -72,6 +72,17 @@ def limpar_endereco(endereco):
     return endereco
 
 
+# Função auxiliar para lidar com valores vazios no mode()
+def get_most_common_or_empty(x):
+    """
+    Retorna o valor mais comum de uma Série Pandas ou uma string vazia se todos forem NaN.
+    """
+    x_limpo = x.dropna()
+    if x_limpo.empty:
+        return ""
+    return x_limpo.mode().iloc[0]
+
+
 @st.cache_data
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
@@ -85,6 +96,12 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             return None
 
     df = df_entrada.copy()
+    
+    # ESSENCIAL PARA EVITAR O KEYERROR: Garante que as colunas críticas de texto sejam strings e preenche NaN com vazio.
+    df['Bairro'] = df['Bairro'].astype(str).replace('nan', '', regex=False)
+    df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
+    df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
+
     
     # Cria uma coluna numérica temporária para a ordenação (ignorando o * e tratando texto)
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
@@ -114,7 +131,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            endereco_oficial_original = df_grupo[COLUNA_ENDERECO].mode()[0]
+            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
+            # Se mode falhar ou retornar vazio, tentamos usar o próprio end_principal como fallback (menos provável)
+            if not endereco_oficial_original:
+                 endereco_oficial_original = end_principal 
             
             for end_similar in grupo_matches:
                 mapa_correcao[end_similar] = endereco_oficial_original
@@ -136,8 +156,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
-        Bairro_Agrupado=('Bairro', lambda x: x.mode()[0]),
-        Zipcode_Agrupado=('Zipcode/Postal code', lambda x: x.mode()[0]),
+        
+        # CORREÇÃO CHAVE: Usando a função auxiliar para Bairro, que lida com grupos vazios.
+        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
+        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         
         # Captura o menor número de sequência original (sem *) para ordenação
         Min_Sequence=('Sequence_Num', 'min') 
@@ -150,8 +172,11 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 6. Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado']
+        df_agrupado['Bairro_Agrupado'].str.strip() # Remove espaços extras
     )
+    # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
+    
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
@@ -180,6 +205,7 @@ def processar_rota_para_impressao(df_input):
     coluna_notes_lower = 'notes'
     
     if coluna_notes_lower not in df_input.columns:
+        # A mensagem de erro será tratada no bloco try/except da interface
         raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
     df = df_input.copy()
@@ -407,8 +433,13 @@ with tab2:
     sheet_name_default = "Table 3" 
     sheet_name = sheet_name_default
     
+    df_final_pos = None # Inicializa para o escopo da aba
+    # Inicializa com uma mensagem para garantir que a text_area não falhe
+    copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+
     # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
+        # st.text_input atualiza a variável sheet_name se o arquivo for XLSX
         sheet_name = st.text_input(
             "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
             value=sheet_name_default
@@ -419,6 +450,7 @@ with tab2:
             if uploaded_file_pos.name.endswith('.csv'):
                 df_input_pos = pd.read_csv(uploaded_file_pos)
             else:
+                # Usa a sheet_name que pode ter sido atualizada pelo st.text_input
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
             # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
@@ -441,39 +473,18 @@ with tab2:
 
                 # --- LÓGICA DE COPIA PARA TEXT AREA ---
                 
-                # Converte para string sem cabeçalho e sem índice. O CSS forçará o alinhamento.
-                copia_data = df_final_pos['Lista de Impressão'].to_string(index=False, header=False) 
+                # CORREÇÃO FINAL PARA REMOVER PADDING: Usa join() para garantir alinhamento 100% esquerdo
+                copia_data = '\n'.join(df_final_pos['Lista de Impressão'].astype(str).tolist())
                 
-                st.markdown("### 2.3 Copiar para a Área de Transferência")
-                
-                st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
-                
-                # Área de texto para visualização e cópia
-                st.text_area(
-                    "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
-                    copia_data, 
-                    height=300
-                )
+            
+            else:
+                 # Mensagem se o arquivo foi lido, mas a lista final está vazia
+                 copia_data = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
 
-                # --- EXPORTAÇÃO PARA EXCEL COM COLUNA ÚNICA FORMATADA ---
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    # Exporta APENAS a coluna formatada 'Lista de Impressão'
-                    df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
-                buffer.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar Lista Limpa (Excel) - Coluna Única",
-                    data=buffer,
-                    file_name="Lista_Ordem_Impressao_UNICA.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Baixe este arquivo e copie o conteúdo da única coluna para garantir o alinhamento esquerdo no Excel/Word.",
-                    key="download_list"
-                )
 
         except KeyError as ke:
              # Captura erros de coluna ou aba
-            if "Table 3" in str(ke):
+            if "Table 3" in str(ke) or "Sheet" in str(ke): # Incluindo Sheet para mensagens genéricas de erro de aba
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
             elif 'notes' in str(ke):
                  st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
@@ -481,3 +492,32 @@ with tab2:
                  st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:
             st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
+            
+    
+    # Renderização da área de cópia e download
+    if uploaded_file_pos is not None:
+        st.markdown("### 2.3 Copiar para a Área de Transferência")
+        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
+        
+        st.text_area(
+            "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
+            copia_data, 
+            height=300
+        )
+
+        # O botão de download só aparece se o df_final_pos não for nulo/vazio
+        if df_final_pos is not None and not df_final_pos.empty:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
+            buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Baixar Lista Limpa (Excel) - Coluna Única",
+                data=buffer,
+                file_name="Lista_Ordem_Impressao_UNICA.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Baixe este arquivo. A coluna de dados agora está formatada como texto único (ID - Anotações), o que garante o alinhamento esquerdo ao copiar do Excel.",
+                key="download_list"
+            )
+

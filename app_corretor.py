@@ -36,7 +36,7 @@ h1, h2, h3, h4, .stMarkdown {
 }
 
 </style>
-""", unsafe_allow_html=True)
+""", unsafe_html=True)
 # --------------------------------------------------------------------------------------
 
 
@@ -45,8 +45,9 @@ COLUNA_ENDERECO = 'Destination Address'
 COLUNA_SEQUENCE = 'Sequence'
 COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
-# NOVA COLUNA PARA A GAIOLA
+# NOVAS COLUNAS
 COLUNA_GAIOLA = 'Gaiola' 
+COLUNA_ID_UNICO = 'ID_UNICO' # ID temporário: Gaiola-Sequence (Ex: A1-1, G3-1)
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
@@ -82,7 +83,6 @@ def get_most_common_or_empty(x):
     x_limpo = x.dropna()
     if x_limpo.empty:
         return ""
-    # iloc[0] é mais robusto que [0] em alguns ambientes
     return x_limpo.mode().iloc[0]
 
 
@@ -90,28 +90,24 @@ def get_most_common_or_empty(x):
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
     Função principal que aplica a correção e o agrupamento.
-    A coluna Sequence já estará ajustada com '*' se necessário.
-    Retorna o DF para o Circuit e o DF original com as marcações.
     """
-    # COLUNA_GAIOLA foi adicionada aqui
-    colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code', COLUNA_GAIOLA]
+    colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code', COLUNA_GAIOLA, COLUNA_ID_UNICO]
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
-            st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
-            return None, None # Retorna dois Nones
+            st.error(f"Erro: A coluna essencial '{col}' não foi encontrada. Verifique se o DataFrame foi carregado corretamente.")
+            return None, None 
 
     df = df_entrada.copy()
     
-    # ESSENCIAL PARA EVITAR O KEYERROR: Garante que as colunas críticas de texto sejam strings e preenche NaN com vazio.
+    # Preenchimento e Garantia de Tipos (Essencial)
     df['Bairro'] = df['Bairro'].astype(str).replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
     df[COLUNA_GAIOLA] = df[COLUNA_GAIOLA].astype(str).replace('nan', '', regex=False)
-
     
-    # Cria uma coluna numérica temporária para a ordenação (ignorando o * e tratando texto)
-    df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
-    # Tenta converter para numérico, se falhar, preenche com um valor muito alto para ir para o final
+    # Cria a coluna numérica para a ORDENAÇÃO. Aqui, usamos a SEQUENCE original do pacote.
+    # A coluna ID_UNICO já deve vir com o * do volumoso, se houver.
+    df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace(r'\*|\s', '', regex=True)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
 
 
@@ -123,30 +119,35 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 2. Fuzzy Matching para Agrupamento
     progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching...")
     total_unicos = len(enderecos_unicos)
-    for i, end_principal in enumerate(enderecos_unicos):
-        if end_principal not in mapa_correcao:
-            matches = process.extract(
-                end_principal, 
-                enderecos_unicos, 
-                scorer=fuzz.WRatio, 
-                limit=None
-            )
-            
-            grupo_matches = [match[0] for match in matches if match[1] >= limite_similaridade]
-            
-            df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
-            # Se mode falhar ou retornar vazio, tentamos usar o próprio end_principal como fallback (menos provável)
-            if not endereco_oficial_original:
-                 endereco_oficial_original = end_principal 
-            
-            for end_similar in grupo_matches:
-                mapa_correcao[end_similar] = endereco_oficial_original
-                
-            progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
     
-    progresso_bar.empty()
-    st.success("Fuzzy Matching concluído!")
+    if total_unicos > 0:
+        for i, end_principal in enumerate(enderecos_unicos):
+            if end_principal not in mapa_correcao:
+                matches = process.extract(
+                    end_principal, 
+                    enderecos_unicos, 
+                    scorer=fuzz.WRatio, 
+                    limit=None
+                )
+                
+                grupo_matches = [match[0] for match in matches if match[1] >= limite_similaridade]
+                
+                df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
+                endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
+                if not endereco_oficial_original:
+                    endereco_oficial_original = end_principal 
+                
+                for end_similar in grupo_matches:
+                    mapa_correcao[end_similar] = endereco_oficial_original
+                    
+                progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+        
+        progresso_bar.empty()
+        st.success("Fuzzy Matching concluído!")
+    else:
+        progresso_bar.empty()
+        st.warning("Nenhum endereço encontrado para processar.")
+
 
     # 3. Aplicação do Endereço Corrigido
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
@@ -155,18 +156,20 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
-        # Agrupa as sequências (que já contêm o *)
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
+        # Agrupa os IDs ÚNICOS (Gaiola-Sequence) que já contêm o '*'
+        Sequences_Agrupadas=(COLUNA_ID_UNICO, 
+                             lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'[^\d]', '', str(y).split('-')[-1])) if re.sub(r'[^\d]', '', str(y).split('-')[-1]).isdigit() else float('inf'))))
+                            ), 
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         
-        # CORREÇÃO CHAVE: Usando a função auxiliar para Bairro, que lida com grupos vazios.
+        # Agrupa as informações comuns
         Bairro_Agrupado=('Bairro', get_most_common_or_empty),
         Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         
-        # NOVO: Agrupa as gaiolas (mantém a primeira ou a mais comum)
-        Gaiola_Agrupada=(COLUNA_GAIOLA, get_most_common_or_empty),
+        # Agrupa as gaiolas (mantém TODAS as gaiolas únicas daquele endereço)
+        Gaiola_Agrupada=(COLUNA_GAIOLA, lambda x: ','.join(sorted(x.unique()))),
         
         # Captura o menor número de sequência original (sem *) para ordenação
         Min_Sequence=('Sequence_Num', 'min') 
@@ -179,29 +182,27 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 6. Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado'].str.strip() # Remove espaços extras
+        df_agrupado['Bairro_Agrupado'].str.strip() 
     )
     
-    # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
     
-    # Incluindo a GAIOLA nas Notas!
+    # Incluindo TODAS as Gaiolas nas Notas!
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
-        ' | Gaiola: ' + df_agrupado['Gaiola_Agrupada'] +
+        ' | Gaiola(s): ' + df_agrupado['Gaiola_Agrupada'] +
         ' | Cidade: ' + df_agrupado['City'] + 
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
 
     df_circuit = pd.DataFrame({
-        'Order ID': df_agrupado['Sequences_Agrupadas'], 
+        'Order ID': df_agrupado['Sequences_Agrupadas'], # IDs ÚNICOS Agrupados (com *)
         'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas
     })
     
-    # Retorna o DataFrame principal (Circuit) e o original processado (df)
     return df_circuit, df 
 
 
@@ -228,7 +229,7 @@ def extract_circuit_info(df_input_raw):
     
     # Divide a coluna na primeira ocorrência de ';'
     df_split = df['notes'].str.split(';', n=1, expand=True)
-    # O ID agrupado (ex: "12,13*") é a primeira parte.
+    # O ID agrupado (ex: "A1-1,G3-2*") é a primeira parte.
     df['Ordem ID'] = df_split[0].str.strip().str.strip('"') 
     
     # Anotações completas (o resto da string)
@@ -242,12 +243,6 @@ def extract_circuit_info(df_input_raw):
     )
     
     return df
-
-def processar_rota_para_impressao(df_input_raw):
-    """ Retorna apenas a coluna formatada para cópia (Lista de Impressão) """
-    df_extracted = extract_circuit_info(df_input_raw)
-    return df_extracted[['Lista de Impressão']]
-
 
 # ===============================================
 # INTERFACE PRINCIPAL
@@ -267,54 +262,71 @@ with tab1:
     st.header("1. Gerar Arquivo para Importar no Circuit")
     st.caption("Esta etapa unifica rotas de diferentes gaiolas, corrige erros de digitação, marca volumes e agrupa pedidos.")
 
-    # Inicializa o estado para armazenar o DataFrame e as ordens marcadas
-    if 'df_original' not in st.session_state:
-        st.session_state['df_original'] = None
-    if 'volumoso_ids' not in st.session_state:
-        st.session_state['volumoso_ids'] = set() 
-    if 'last_uploaded_name' not in st.session_state:
-         st.session_state['last_uploaded_name'] = None
+    # Inicializa o estado para armazenar a lista de DataFrames carregados (com gaiola e nome)
+    if 'loaded_dfs' not in st.session_state:
+        st.session_state['loaded_dfs'] = []
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilhas Originais e Definir Gaiolas")
-    st.info("Carregue **todas** as planilhas (máximo 5) que você deseja unificar em uma rota única.")
+    st.info("Carregue **todas** as planilhas. A marcação de volumosos será feita para cada planilha individualmente na próxima etapa.")
 
-    # Mudar o file_uploader para aceitar múltiplos arquivos
     uploaded_files_pre = st.file_uploader(
         "Arraste e solte os arquivos originais (CSV/Excel) aqui:", 
         type=['csv', 'xlsx'],
-        accept_multiple_files=True, # CHAVE PARA MÚLTIPLOS ARQUIVOS
+        accept_multiple_files=True, 
         key="file_pre"
     )
 
-    df_list = [] # Lista para armazenar os DataFrames de todas as planilhas
-    gaiolas_ok = True
     
     if uploaded_files_pre:
-        st.markdown("#### Defina o Código da Gaiola para cada arquivo:")
-        
-        # Usa um form para submeter todas as entradas de gaiola de uma vez
-        with st.form("gaiola_form"):
+        # Verifica se a lista de arquivos mudou, se sim, limpa o estado
+        current_file_names = {f.name for f in uploaded_files_pre}
+        loaded_file_names = {item['file_name'] for item in st.session_state['loaded_dfs']}
+
+        if current_file_names != loaded_file_names:
+            st.session_state['loaded_dfs'] = []
+            
+            # Inicializa o estado com os novos arquivos
             for i, uploaded_file in enumerate(uploaded_files_pre):
-                # O nome do arquivo ajuda a identificar
+                 # Adiciona um placeholder para a gaiola
+                st.session_state['loaded_dfs'].append({
+                    'file_name': uploaded_file.name,
+                    'file_object': uploaded_file,
+                    'gaiola': f"G{i+1}", 
+                    'df': None, # O DataFrame bruto
+                    'volumosos': set() # Set de Sequences originais marcadas como volumosas
+                })
+            
+            # Limpa qualquer input antigo
+            st.session_state['df_unificado_final'] = None
+
+        
+        st.markdown("#### Defina o Código da Gaiola para cada arquivo e Inicie a Carga:")
+        
+        # Usa um form para submeter todas as entradas de gaiola e iniciar a carga
+        with st.form("gaiola_form"):
+            for i, item in enumerate(st.session_state['loaded_dfs']):
                 gaiola_input = st.text_input(
-                    f"Código da Gaiola para **{uploaded_file.name}**", 
-                    key=f"gaiola_{i}",
-                    value=st.session_state.get(f"gaiola_value_{i}", f"G{i+1}"), # Mantém o valor se já foi digitado
+                    f"Código da Gaiola para **{item['file_name']}**", 
+                    key=f"gaiola_input_{i}",
+                    value=item['gaiola'],
                     max_chars=10
                 )
-                # Salva o valor no session_state (útil para o próximo rerun)
-                st.session_state[f"gaiola_value_{i}"] = gaiola_input
+                # Atualiza o item na lista com o valor digitado (temporariamente)
+                item['gaiola'] = gaiola_input
                 
-            # Botão de submissão do formulário
-            submitted = st.form_submit_button("Confirmar Gaiolas e Iniciar Carga")
+            submitted = st.form_submit_button("Confirmar Gaiolas e Iniciar Processamento Individual")
             
-            if submitted or 'df_original' in st.session_state:
-                st.markdown("---")
-                # Lógica de processamento de múltiplos arquivos
+            if submitted: 
+                df_list = []
+                gaiolas_ok = True
                 
-                for i, uploaded_file in enumerate(uploaded_files_pre):
-                    gaiola_code = st.session_state[f"gaiola_value_{i}"]
+                st.markdown("---")
+                st.subheader("Processando Arquivos Individualmente...")
+
+                for i, item in enumerate(st.session_state['loaded_dfs']):
+                    gaiola_code = item['gaiola'].strip()
+                    uploaded_file = item['file_object']
                     
                     if not gaiola_code:
                         st.warning(f"O arquivo '{uploaded_file.name}' não tem código de gaiola definido. Por favor, preencha.")
@@ -322,20 +334,27 @@ with tab1:
                         break
 
                     try:
+                        # 1. Carregar DataFrame
                         if uploaded_file.name.endswith('.csv'):
                             df_input_pre = pd.read_csv(uploaded_file, encoding='utf-8')
                         else:
                             df_input_pre = pd.read_excel(uploaded_file, sheet_name=0)
                         
-                        # --- VALIDAÇÃO DE COLUNAS ---
+                        # 2. Validação e Preparação
                         colunas_basicas = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
                         for col in colunas_basicas:
                             if col not in df_input_pre.columns:
                                 raise KeyError(f"A coluna '{col}' está faltando no arquivo '{uploaded_file.name}'.")
                         
-                        # --- INSERÇÃO DA NOVA COLUNA 'Gaiola' ---
+                        # 3. Adicionar Gaiola e Coluna de Sequência
                         df_input_pre[COLUNA_GAIOLA] = gaiola_code
-                        df_list.append(df_input_pre)
+                        df_input_pre[COLUNA_SEQUENCE] = df_input_pre[COLUNA_SEQUENCE].astype(str) # Garante que a sequência é string
+                        
+                        # 4. Salvar o DF processado (com a coluna Gaiola) no estado
+                        item['df'] = df_input_pre.copy() 
+                        st.session_state['loaded_dfs'][i] = item # Atualiza o item no state
+
+                        st.info(f"✅ Arquivo **{uploaded_file.name}** (Gaiola: **{gaiola_code}**) carregado com **{len(df_input_pre)}** pacotes.")
                         
                     except KeyError as ke:
                         st.error(f"Erro de Coluna no arquivo '{uploaded_file.name}': {ke}")
@@ -346,85 +365,114 @@ with tab1:
                         gaiolas_ok = False
                         break
 
-                if gaiolas_ok and df_list:
-                    # CONCATENAÇÃO FINAL: Junta todos os DataFrames em um só
-                    df_unificado = pd.concat(df_list, ignore_index=True)
-                    
-                    # Reinicia as marcações de volumosos se o arquivo for novo/diferente
-                    # Aqui usamos o comprimento total do DF unificado como um 'hash'
-                    current_hash = len(df_unificado)
-                    if st.session_state.get('last_uploaded_hash') != current_hash:
-                         st.session_state['volumoso_ids'] = set()
-                         st.session_state['last_uploaded_hash'] = current_hash
-                         st.session_state['last_uploaded_name'] = ", ".join([f.name for f in uploaded_files_pre]) # Apenas para info
-                         
-                    st.session_state['df_original'] = df_unificado.copy()
-                    st.success(f"**{len(df_list)}** planilhas unificadas! Total de **{len(df_unificado)}** registros carregados.")
-                    st.caption(f"Gaiolas unificadas: {', '.join(set([st.session_state[f'gaiola_value_{i}'] for i in range(len(uploaded_files_pre))]))}")
+                if gaiolas_ok:
+                    st.success("Carga dos arquivos concluída. Prossiga para a marcação de volumosos.")
+                    st.session_state['df_unificado_final'] = None # Limpa o resultado final para forçar o recálculo
                 else:
-                    st.session_state['df_original'] = None
+                    st.session_state['loaded_dfs'] = [] # Se falhar, reseta a lista de arquivos carregados
+                    st.session_state['df_unificado_final'] = None
 
-    
-    # Limpa a sessão se o arquivo for removido
-    elif uploaded_files_pre is None and st.session_state.get('df_original') is not None:
-        st.session_state['df_original'] = None
-        st.session_state['volumoso_ids'] = set()
-        st.session_state['last_uploaded_name'] = None
-        st.session_state['last_uploaded_hash'] = None
-        st.rerun() 
-        
 
-    
     # ----------------------------------------------------------------------------------
-    # RESTANTE DA LÓGICA (1.2 e 1.3)
+    # 1.2 MARCAÇÃO INDIVIDUAL DE VOLUMOSOS
     # ----------------------------------------------------------------------------------
-    if st.session_state.get('df_original') is not None:
-        
+    
+    # Verifica se há DFs carregados e prontos para a marcação
+    dfs_prontos_para_marcar = [item for item in st.session_state['loaded_dfs'] if item.get('df') is not None]
+    
+    if dfs_prontos_para_marcar:
         st.markdown("---")
-        st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+        st.subheader("1.2 Marcar Pacotes Volumosos por Planilha (Volumosos = *)")
+        st.info("Marque individualmente os números de sequência (Sequence) que são volumosos em cada gaiola. Eles serão marcados com `*`.")
         
-        # --- ORDENAÇÃO NUMÉRICA FORÇADA ---
-        df_temp = st.session_state['df_original'].copy()
-        df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
-        
-        # Lista as ordens únicas e classifica pela coluna numérica temporária
-        ordens_originais_sorted = df_temp.sort_values('Order_Num')[COLUNA_SEQUENCE].astype(str).unique()
-        # ----------------------------------------------------------------
-        
-        
-        # Função de callback para atualizar o set de IDs volumosos
-        def update_volumoso_ids(order_id, is_checked):
-            if is_checked:
-                st.session_state['volumoso_ids'].add(order_id)
-            elif order_id in st.session_state['volumoso_ids']:
-                st.session_state['volumoso_ids'].remove(order_id)
+        # Cria as abas para cada arquivo carregado
+        tab_titles = [f"{item['gaiola']} ({item['file_name']})" for item in dfs_prontos_para_marcar]
+        tabs = st.tabs(tab_titles)
 
-        st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
-
-        # Container para os checkboxes
-        with st.container(height=300):
-             # Itera pela lista ordenada e exibe um checkbox por linha (Ordem 1, 2, 3...)
-            for order_id in ordens_originais_sorted:
+        # Itera sobre os DFs prontos e cria a interface de marcação
+        for i, item in enumerate(dfs_prontos_para_marcar):
+            with tabs[i]:
+                df_current = item['df'].copy()
+                gaiola_code = item['gaiola']
                 
-                # Exibe a gaiola junto do Order ID para facilitar
-                gaiola_info = df_temp[df_temp[COLUNA_SEQUENCE].astype(str) == str(order_id)][COLUNA_GAIOLA].iloc[0]
-                display_label = f"[{gaiola_info}] {order_id}"
+                st.markdown(f"#### Gaiola **{gaiola_code}** (Total de **{len(df_current)}** pacotes)")
                 
-                is_checked = order_id in st.session_state['volumoso_ids']
+                # --- Preparação da lista de Sequences Originais ---
+                df_current['Sort_Key'] = pd.to_numeric(df_current[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
+                sequences_sorted = df_current.sort_values('Sort_Key')[COLUNA_SEQUENCE].astype(str).unique()
                 
-                st.checkbox(
-                    display_label, 
-                    value=is_checked, 
-                    key=f"vol_{order_id}",
-                    on_change=update_volumoso_ids, 
-                    args=(order_id, not is_checked) 
-                )
+                # Armazena os IDs volumosos (Sequences originais) desta gaiola no state
+                volumosos_set = item['volumosos']
+                
+                # Callback para o checkbox
+                def update_volumoso_set(seq_id, is_checked, item_index):
+                    if is_checked:
+                        st.session_state['loaded_dfs'][item_index]['volumosos'].add(seq_id)
+                    elif seq_id in st.session_state['loaded_dfs'][item_index]['volumosos']:
+                        st.session_state['loaded_dfs'][item_index]['volumosos'].remove(seq_id)
 
+                # Colunas para o layout de faixa
+                col_start, col_end, col_button_mark, col_button_unmark = st.columns([1.5, 1.5, 2, 2])
+                
+                # --- Marcação em Faixa ---
+                with col_start:
+                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=sequences_sorted[0], key=f"start_seq_vol_{i}")
+                with col_end:
+                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=sequences_sorted[-1], key=f"end_seq_vol_{i}")
+                
+                
+                # Função de helper para encontrar sequências numéricas entre o range (mesmo que sejam strings)
+                def get_sequences_in_range(df, col, start, end):
+                    # Tenta converter para numérico para a comparação de faixa
+                    df['Temp_Num'] = pd.to_numeric(df[col], errors='coerce')
+                    try:
+                        start_num = pd.to_numeric(start, errors='coerce')
+                        end_num = pd.to_numeric(end, errors='coerce')
+                    except:
+                        return []
+                    
+                    if pd.isna(start_num) or pd.isna(end_num): return []
+                    
+                    return df[
+                        (df['Temp_Num'] >= start_num) & (df['Temp_Num'] <= end_num)
+                    ][col].astype(str).unique().tolist()
+                    
+                
+                with col_button_mark:
+                    if st.button("Marcar Faixa", key=f"btn_mark_range_{i}"):
+                        sequences_to_mark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
+                        for seq in sequences_to_mark:
+                            st.session_state['loaded_dfs'][i]['volumosos'].add(seq)
+                        st.rerun()
 
-        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
+                with col_button_unmark:
+                    if st.button("Limpar Faixa", key=f"btn_unmark_range_{i}"):
+                        sequences_to_unmark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
+                        for seq in sequences_to_unmark:
+                            if seq in st.session_state['loaded_dfs'][i]['volumosos']:
+                                st.session_state['loaded_dfs'][i]['volumosos'].remove(seq)
+                        st.rerun()
+
+                st.info(f"**{len(volumosos_set)}** de **{len(sequences_sorted)}** pacotes marcados como volumosos nesta gaiola.")
+                
+                st.markdown("##### Marcação Individual")
+                with st.container(height=250):
+                    # Marcação individual por checkbox
+                    for seq_id in sequences_sorted:
+                        is_checked = seq_id in volumosos_set
+                        st.checkbox(
+                            f"Seq: {seq_id}", 
+                            value=is_checked, 
+                            key=f"vol_{gaiola_code}_{seq_id}",
+                            on_change=update_volumoso_set, 
+                            args=(seq_id, not is_checked, i) 
+                        )
         
+        # ----------------------------------------------------------------------------------
+        # 1.3 UNIFICAÇÃO, CORREÇÃO E PROCESSAMENTO FINAL
+        # ----------------------------------------------------------------------------------
         st.markdown("---")
-        st.subheader("1.3 Configurar e Processar")
+        st.subheader("1.3 Unificar e Processar Rotas")
         
         limite_similaridade_ajustado = st.slider(
             'Ajuste a Precisão do Corretor (Fuzzy Matching):',
@@ -437,27 +485,38 @@ with tab1:
         st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
         
         
-        if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final_run"):
+        if st.button("🚀 UNIFICAR, CORRIGIR E AGRUPAR PARA CIRCUIT", key="btn_pre_final_run"):
             
-            # 1. Aplicar a marcação * no DF antes de processar
-            df_para_processar = st.session_state['df_original'].copy()
+            df_final_list = []
             
-            # Garante que a coluna Sequence seja string para manipulação
-            df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
-            
-            # Aplica o * nos IDs que estão no set
-            for id_volumoso in st.session_state['volumoso_ids']:
-                str_id_volumoso = str(id_volumoso)
+            # 1. Unificação e Aplicação do Asterisco (*) e ID_UNICO
+            for item in st.session_state['loaded_dfs']:
+                df_proc = item['df'].copy()
+                gaiola = item['gaiola']
+                volumosos = item['volumosos']
                 
-                # Filtra a coluna Sequence para garantir que apenas o ID exato seja marcado
-                df_para_processar.loc[
-                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
-                    COLUNA_SEQUENCE
-                ] = str_id_volumoso + '*'
+                # Cria a coluna ID_UNICO sem o asterisco inicial
+                df_proc[COLUNA_ID_UNICO] = df_proc[COLUNA_GAIOLA].astype(str) + '-' + df_proc[COLUNA_SEQUENCE].astype(str)
 
-            # 2. Iniciar o processamento e agrupamento
+                # Aplica o * (asterisco) no ID_UNICO se a Sequence original estiver no set de volumosos
+                for seq_volumoso in volumosos:
+                    str_seq_volumoso = str(seq_volumoso)
+                    
+                    # Filtra os registros que correspondem àquela SEQUENCE e GAIOLA
+                    df_proc.loc[
+                        (df_proc[COLUNA_SEQUENCE] == str_seq_volumoso) & (df_proc[COLUNA_GAIOLA] == gaiola), 
+                        COLUNA_ID_UNICO
+                    ] = df_proc[COLUNA_ID_UNICO] + '*'
+
+                df_final_list.append(df_proc)
+
+            # CONCATENAÇÃO FINAL: Junta todos os DataFrames (com ID_UNICO já marcado)
+            df_unificado = pd.concat(df_final_list, ignore_index=True)
+            st.session_state['df_unificado_final'] = df_unificado.copy()
+            
+            # 2. Iniciar o processamento e agrupamento (Fuzzy Matching, Agrupamento e Ordenação)
             df_circuit, df_processado_completo = processar_e_corrigir_dados(
-                df_para_processar, 
+                st.session_state['df_unificado_final'], 
                 limite_similaridade_ajustado
             )
             
@@ -465,20 +524,19 @@ with tab1:
                 st.markdown("---")
                 st.header("✅ Resultado Concluído!")
                 
-                total_entradas = len(st.session_state['df_original'])
+                total_entradas = len(st.session_state['df_unificado_final'])
                 total_agrupados = len(df_circuit)
                 
                 st.metric(
                     label="Endereços Únicos Agrupados",
                     value=total_agrupados,
-                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                    delta=f"-{total_entradas - total_agrupados} pacotes agrupados"
                 )
                 
                 # --- SAÍDA 1: ARQUIVO PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("Arquivo para Roteirização (Circuit)")
                 st.dataframe(df_circuit, use_container_width=True)
                 
-                # Download Circuit
                 buffer_circuit = io.BytesIO()
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
                     df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
@@ -493,24 +551,23 @@ with tab1:
                 )
                 
                 # --- SAÍDA 2: PLANILHA DE VOLUMOSOS SEPARADA ---
-                # Filtra o DataFrame completo processado (que inclui o '*')
                 df_volumosos = df_processado_completo[
-                    df_processado_completo[COLUNA_SEQUENCE].astype(str).str.contains(r'\*', regex=True, na=False)
+                    df_processado_completo[COLUNA_ID_UNICO].astype(str).str.contains(r'\*', regex=True, na=False)
                 ].copy()
                 
-                # Ordena pelo número de sequência (sem o '*')
-                df_volumosos['Sort_Key'] = pd.to_numeric(df_volumosos[COLUNA_SEQUENCE].str.replace('*', '', regex=False), errors='coerce')
-                df_volumosos = df_volumosos.sort_values(by='Sort_Key').drop(columns=['Sort_Key'])
+                df_volumosos['Sort_Key'] = df_volumosos[COLUNA_SEQUENCE].astype(str).str.replace(r'\*|\s', '', regex=True)
+                df_volumosos['Sort_Key'] = pd.to_numeric(df_volumosos['Sort_Key'], errors='coerce')
+                df_volumosos = df_volumosos.sort_values(by=['Gaiola', 'Sort_Key']).drop(columns=['Sort_Key'])
 
                 if not df_volumosos.empty:
                     st.markdown("---")
                     st.subheader("Planilha de APENAS Volumosos (Pacotes com *)")
-                    st.caption(f"Contém **{len(df_volumosos)}** itens marcados com *.")
+                    st.caption(f"Contém **{len(df_volumosos)}** itens marcados com *. Ordenado por Gaiola e Sequência Original.")
 
-                    # Seleciona as colunas relevantes para o motorista/logística
                     df_vol_export = df_volumosos[[
+                        COLUNA_ID_UNICO, 
+                        COLUNA_GAIOLA, 
                         COLUNA_SEQUENCE, 
-                        COLUNA_GAIOLA, # Incluindo a gaiola aqui também
                         COLUNA_ENDERECO, 
                         'Bairro', 
                         'City', 
@@ -519,8 +576,9 @@ with tab1:
                     ]].copy()
                     
                     df_vol_export.columns = [
-                        'Order ID (com *)', 
+                        'ID Único (Gaiola-Seq*)', 
                         'Gaiola',
+                        'Nº da Sequência Original',
                         'Endereço Original', 
                         'Bairro', 
                         'Cidade', 
@@ -530,7 +588,6 @@ with tab1:
 
                     st.dataframe(df_vol_export, use_container_width=True)
                     
-                    # Download Volumosos
                     buffer_vol = io.BytesIO()
                     with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer:
                         df_vol_export.to_excel(writer, index=False, sheet_name='Volumosos')
@@ -543,6 +600,10 @@ with tab1:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_excel_volumosos"
                     )
+
+    else:
+        # Se não houver DFs prontos, garantir que o resultado final seja limpo
+        st.session_state['df_unificado_final'] = None
 
 
 # ----------------------------------------------------------------------------------
@@ -565,47 +626,39 @@ with tab2:
     sheet_name_default = "Table 3" 
     sheet_name = sheet_name_default
     
-    df_raw_pos = None # DataFrame bruto carregado
-    df_extracted = None # DataFrame processado para extração de IDs
-    
-    # Inicializa com uma mensagem para garantir que a text_area não falhe
+    df_raw_pos = None 
+    df_extracted = None 
     copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
 
-    # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
-        # st.text_input atualiza a variável sheet_name se o arquivo for XLSX
         sheet_name = st.text_input(
             "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=sheet_name_default
+            value=st.session_state.get('sheet_name_pos', sheet_name_default),
+            key="sheet_name_pos_input"
         )
+        st.session_state['sheet_name_pos'] = sheet_name 
     
-    # --- Lógica de Carregamento e Processamento Inicial ---
     if uploaded_file_pos is not None:
         try:
+            current_sheet_name = sheet_name if uploaded_file_pos.name.endswith('.xlsx') else None
+
             if uploaded_file_pos.name.endswith('.csv'):
-                 # Usando um encoding mais robusto para CSV
                 df_raw_pos = pd.read_csv(uploaded_file_pos, encoding='utf-8')
             else:
-                df_raw_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
+                df_raw_pos = pd.read_excel(uploaded_file_pos, sheet_name=current_sheet_name)
             
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_raw_pos)}** registros.")
             
-            # Processa para extrair IDs
             df_extracted = extract_circuit_info(df_raw_pos)
 
             if df_extracted is not None and not df_extracted.empty:
-                
-                # 2.2 Resultado Final (Lista de Impressão de TODOS os itens)
                 st.markdown("---")
                 st.subheader("2.2 Lista Completa (Para Cópia/Impressão)")
-                st.caption("A lista abaixo contém *TODOS* os itens da rota. Use a área de texto ou o download para cópia rápida.")
                 
-                # Exibe a tabela
                 df_visualizacao = df_extracted[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_visualizacao.columns = ['#', 'ID Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
+                df_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
                 st.dataframe(df_visualizacao, use_container_width=True)
 
-                # --- LÓGICA DE COPIA PARA TEXT AREA ---
                 copia_data = '\n'.join(df_extracted['Lista de Impressão'].astype(str).tolist())
             
             else:
@@ -614,17 +667,16 @@ with tab2:
 
         except KeyError as ke:
             if "Table 3" in str(ke) or "Sheet" in str(ke): 
-                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
+                st.error(f"Erro de Aba: A aba **'{current_sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
             elif 'notes' in str(ke) or '#' in str(ke):
                  st.error(f"Erro de Coluna: O arquivo da rota deve conter as colunas **#** (Sequência de Parada) e **Notes**. Verifique o arquivo de rota.")
             else:
                  st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
+            st.error(f"Ocorreu um erro ao processar o arquivo. Erro: {e}")
             
     
-    # --- 2.3 Área de Cópia e Download da Lista COMPLETA ---
-    if df_extracted is not None:
+    if uploaded_file_pos is not None:
         st.markdown("### 2.3 Copiar Lista Completa para a Área de Transferência")
         st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
         
@@ -635,7 +687,7 @@ with tab2:
             key="text_area_completa"
         )
 
-        if not df_extracted.empty:
+        if df_extracted is not None and not df_extracted.empty:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
                 df_extracted[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao')
@@ -651,34 +703,26 @@ with tab2:
             )
 
 
-    # ----------------------------------------------------------------------------------
-    # 2.4 FILTRO DE VOLUMOSOS (NOVA FUNCIONALIDADE)
-    # ----------------------------------------------------------------------------------
     st.markdown("---")
     st.header("📦 2.4 Filtrar Apenas Volumosos (Mantendo a Sequência)")
 
     if df_extracted is not None and not df_extracted.empty:
         
-        # O botão que o usuário deve clicar para ver a lista de volumosos
         if st.button("✨ Mostrar APENAS Pacotes Volumosos (*)", key="btn_filtro_volumosos"):
             
-            # FILTRAGEM: O Order ID tem que conter o * (asterisco)
             df_volumosos = df_extracted[
                 df_extracted['Ordem ID'].astype(str).str.contains(r'\*', regex=True, na=False)
-            ].copy() # Usar .copy() para evitar SettingWithCopyWarning
+            ].copy() 
             
             if not df_volumosos.empty:
                 st.success(f"Filtro aplicado! Encontrados **{len(df_volumosos)}** paradas com itens volumosos.")
 
-                # Formata a lista de impressão dos volumosos (apenas a coluna)
                 copia_data_volumosos = '\n'.join(df_volumosos['Lista de Impressão'].astype(str).tolist())
                 
                 st.subheader("Lista de Volumosos Filtrada (Sequência do Circuit)")
-                st.caption("A tabela abaixo mostra apenas as paradas que contêm pacotes marcados com *. A coluna **#** mostra a sequência original do Circuit.")
 
-                # Exibe a tabela filtrada
                 df_vol_visualizacao = df_volumosos[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_vol_visualizacao.columns = ['#', 'ID Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
+                df_vol_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
                 st.dataframe(
                     df_vol_visualizacao, 
                     use_container_width=True
@@ -692,7 +736,6 @@ with tab2:
                     key="text_area_volumosos"
                 )
 
-                # Download Volumosos
                 buffer_vol = io.BytesIO()
                 with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer: 
                     df_volumosos[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')

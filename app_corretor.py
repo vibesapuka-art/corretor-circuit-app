@@ -12,29 +12,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
+# --- CSS Simplificado para evitar TypeError e garantir alinhamento ---
+# O bloco CSS foi simplificado para resolver o erro 'TypeError'
 st.markdown("""
 <style>
-/* Alinha o texto de entrada na caixa de texto (útil para formulários) */
-.stTextArea [data-baseweb="base-input"] {
-    text-align: left;
-    font-family: monospace;
-}
-/* *** CSS FORTE: Garante que o conteúdo e o título do st.text_area sejam alinhados à esquerda *** */
-div.stTextArea > label {
-    text-align: left !important; /* Título do text area */
-}
 /* Força o alinhamento à esquerda no campo de texto principal */
 div[data-testid="stTextarea"] textarea {
-    text-align: left !important; /* Conteúdo do text area */
+    text-align: left !important;
     font-family: monospace;
-    white-space: pre-wrap; /* Garante quebras de linha corretas */
+    white-space: pre-wrap;
 }
 /* Alinha os títulos e outros elementos em geral */
 h1, h2, h3, h4, .stMarkdown {
     text-align: left !important;
 }
-
 </style>
 """, unsafe_html=True)
 # --------------------------------------------------------------------------------------
@@ -373,6 +364,14 @@ with tab1:
                     st.session_state['df_unificado_final'] = None
 
 
+    # Limpa a sessão se o arquivo for removido
+    elif uploaded_files_pre is None and st.session_state.get('loaded_dfs'):
+        st.session_state['loaded_dfs'] = []
+        st.session_state['df_unificado_final'] = None
+        st.rerun() 
+        
+
+    
     # ----------------------------------------------------------------------------------
     # 1.2 MARCAÇÃO INDIVIDUAL DE VOLUMOSOS
     # ----------------------------------------------------------------------------------
@@ -406,6 +405,7 @@ with tab1:
                 
                 # Callback para o checkbox
                 def update_volumoso_set(seq_id, is_checked, item_index):
+                    # Usamos o `session_state` diretamente
                     if is_checked:
                         st.session_state['loaded_dfs'][item_index]['volumosos'].add(seq_id)
                     elif seq_id in st.session_state['loaded_dfs'][item_index]['volumosos']:
@@ -416,9 +416,9 @@ with tab1:
                 
                 # --- Marcação em Faixa ---
                 with col_start:
-                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=sequences_sorted[0], key=f"start_seq_vol_{i}")
+                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=sequences_sorted[0] if len(sequences_sorted) > 0 else 1, key=f"start_seq_vol_{i}")
                 with col_end:
-                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=sequences_sorted[-1], key=f"end_seq_vol_{i}")
+                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=sequences_sorted[-1] if len(sequences_sorted) > 0 else 1, key=f"end_seq_vol_{i}")
                 
                 
                 # Função de helper para encontrar sequências numéricas entre o range (mesmo que sejam strings)
@@ -443,15 +443,15 @@ with tab1:
                         sequences_to_mark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
                         for seq in sequences_to_mark:
                             st.session_state['loaded_dfs'][i]['volumosos'].add(seq)
-                        st.rerun()
-
+                        # Não fazemos rerun, a mudança é refletida no estado e reexibida
+                        
                 with col_button_unmark:
                     if st.button("Limpar Faixa", key=f"btn_unmark_range_{i}"):
                         sequences_to_unmark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
                         for seq in sequences_to_unmark:
                             if seq in st.session_state['loaded_dfs'][i]['volumosos']:
                                 st.session_state['loaded_dfs'][i]['volumosos'].remove(seq)
-                        st.rerun()
+                        # Não fazemos rerun, a mudança é refletida no estado e reexibida
 
                 st.info(f"**{len(volumosos_set)}** de **{len(sequences_sorted)}** pacotes marcados como volumosos nesta gaiola.")
                 
@@ -491,6 +491,10 @@ with tab1:
             
             # 1. Unificação e Aplicação do Asterisco (*) e ID_UNICO
             for item in st.session_state['loaded_dfs']:
+                # Pula se o DF não foi carregado corretamente
+                if item['df'] is None:
+                    continue
+                    
                 df_proc = item['df'].copy()
                 gaiola = item['gaiola']
                 volumosos = item['volumosos']
@@ -509,6 +513,10 @@ with tab1:
                     ] = df_proc[COLUNA_ID_UNICO] + '*'
 
                 df_final_list.append(df_proc)
+                
+            if not df_final_list:
+                st.error("Não há planilhas válidas e processadas para unificar. Carregue os arquivos e clique em 'Confirmar Gaiolas'.")
+                return # Sai da função se a lista estiver vazia
 
             # CONCATENAÇÃO FINAL: Junta todos os DataFrames (com ID_UNICO já marcado)
             df_unificado = pd.concat(df_final_list, ignore_index=True)

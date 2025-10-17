@@ -153,24 +153,4 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         # Agrupa as sequências (que já contêm o *)
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
-        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
-        Latitude=(COLUNA_LATITUDE, 'first'),
-        Longitude=(COLUNA_LONGITUDE, 'first'),
-        
-        # CORREÇÃO CHAVE: Usando a função auxiliar para Bairro, que lida com grupos vazios.
-        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
-        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
-        
-        # Captura o menor número de sequência original (sem *) para ordenação
-        Min_Sequence=('Sequence_Num', 'min') 
-        
-    ).reset_index()
-
-    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
-    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
-    
-    # 6. Formatação do DF para o CIRCUIT 
-    endereco_completo_circuit = (
-        df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado'].str.strip() # Remove
+        Sequences_Ag

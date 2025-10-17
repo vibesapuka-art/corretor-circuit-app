@@ -387,14 +387,33 @@ with tab1:
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
                 
+                # -------------------------------------------------------------------------------------------------
+                # 💥 NOVO BLOCO DE LÓGICA: SEPARAÇÃO E DOWNLOAD COM DUAS ABAS
+                # -------------------------------------------------------------------------------------------------
+                
+                # 1. FILTRAR DADOS PARA A NOVA ABA "APENAS_VOLUMOSOS"
+                # Filtra o DataFrame agrupado para identificar as linhas que contêm '*' no Order ID
+                df_volumosos_separado = df_circuit[
+                    df_circuit['Order ID'].astype(str).str.contains(r'\*', regex=True)
+                ].copy()
+                
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("Arquivo para Roteirização (Circuit)")
                 st.dataframe(df_circuit, use_container_width=True)
                 
-                # Download Circuit
+                # Download Circuit (AGORA COM DUAS ABAS NO MESMO ARQUIVO EXCEL)
                 buffer_circuit = io.BytesIO()
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                    # 1ª Aba: O arquivo principal para importação no Circuit
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
+                    
+                    # 2ª Aba: A lista filtrada apenas com os pedidos que contêm volumosos
+                    if not df_volumosos_separado.empty:
+                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos (abas: 'Circuit_Import_Geral' e 'APENAS_VOLUMOSOS').")
+                    else:
+                        st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
+                        
                 buffer_circuit.seek(0)
                 
                 st.download_button(
@@ -404,6 +423,10 @@ with tab1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )
+                
+                # -------------------------------------------------------------------------------------------------
+                # 💥 FIM DO NOVO BLOCO
+                # -------------------------------------------------------------------------------------------------
 
     # Limpa a sessão se o arquivo for removido
     elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
@@ -520,4 +543,3 @@ with tab2:
                 help="Baixe este arquivo. A coluna de dados agora está formatada como texto único (ID - Anotações), o que garante o alinhamento esquerdo ao copiar do Excel.",
                 key="download_list"
             )
-

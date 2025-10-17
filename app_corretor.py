@@ -176,4 +176,5 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     )
     
     # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
-    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex)
+

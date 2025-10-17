@@ -376,7 +376,7 @@ with tab1:
     # 1.2 MARCAÇÃO INDIVIDUAL DE VOLUMOSOS
     # ----------------------------------------------------------------------------------
     
-    # Verifica se há DFs carregados e prontos para a marcação
+    # CORREÇÃO DE SINTAXE AQUI: Garante que a lista está bem definida.
     dfs_prontos_para_marcar = [item for item in st.session_state['loaded_dfs'] if item.get('df') is not None]
     
     if dfs_prontos_para_marcar:
@@ -389,4 +389,357 @@ with tab1:
         tabs = st.tabs(tab_titles)
 
         # Itera sobre os DFs prontos e cria a interface de marcação
-        for i, item in enumerate(dfs_prontos
+        for i, item in enumerate(dfs_prontos_para_marcar):
+            with tabs[i]:
+                df_current = item['df'].copy()
+                gaiola_code = item['gaiola']
+                
+                st.markdown(f"#### Gaiola **{gaiola_code}** (Total de **{len(df_current)}** pacotes)")
+                
+                # --- Preparação da lista de Sequences Originais ---
+                df_current['Sort_Key'] = pd.to_numeric(df_current[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
+                sequences_sorted = df_current.sort_values('Sort_Key')[COLUNA_SEQUENCE].astype(str).unique()
+                
+                # Armazena os IDs volumosos (Sequences originais) desta gaiola no state
+                volumosos_set = item['volumosos']
+                
+                # Callback para o checkbox
+                def update_volumoso_set(seq_id, is_checked, item_index):
+                    # Usamos o `session_state` diretamente
+                    if is_checked:
+                        st.session_state['loaded_dfs'][item_index]['volumosos'].add(seq_id)
+                    elif seq_id in st.session_state['loaded_dfs'][item_index]['volumosos']:
+                        st.session_state['loaded_dfs'][item_index]['volumosos'].remove(seq_id)
+
+                # Colunas para o layout de faixa
+                col_start, col_end, col_button_mark, col_button_unmark = st.columns([1.5, 1.5, 2, 2])
+                
+                # --- Marcação em Faixa ---
+                # Garante valores padrão se a lista de sequências for vazia
+                start_default = sequences_sorted[0] if len(sequences_sorted) > 0 else "1"
+                end_default = sequences_sorted[-1] if len(sequences_sorted) > 0 else "1"
+                
+                with col_start:
+                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=start_default, key=f"start_seq_vol_{i}")
+                with col_end:
+                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=end_default, key=f"end_seq_vol_{i}")
+                
+                
+                # Função de helper para encontrar sequências numéricas entre o range (mesmo que sejam strings)
+                def get_sequences_in_range(df, col, start, end):
+                    # Tenta converter para numérico para a comparação de faixa
+                    df['Temp_Num'] = pd.to_numeric(df[col], errors='coerce')
+                    try:
+                        start_num = pd.to_numeric(start, errors='coerce')
+                        end_num = pd.to_numeric(end, errors='coerce')
+                    except:
+                        return []
+                    
+                    if pd.isna(start_num) or pd.isna(end_num): return []
+                    
+                    return df[
+                        (df['Temp_Num'] >= start_num) & (df['Temp_Num'] <= end_num)
+                    ][col].astype(str).unique().tolist()
+                    
+                
+                with col_button_mark:
+                    if st.button("Marcar Faixa", key=f"btn_mark_range_{i}"):
+                        sequences_to_mark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
+                        for seq in sequences_to_mark:
+                            st.session_state['loaded_dfs'][i]['volumosos'].add(seq)
+                        st.rerun() # Adiciona rerun para atualizar a contagem de volumosos no info
+
+                with col_button_unmark:
+                    if st.button("Limpar Faixa", key=f"btn_unmark_range_{i}"):
+                        sequences_to_unmark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
+                        for seq in sequences_to_unmark:
+                            if seq in st.session_state['loaded_dfs'][i]['volumosos']:
+                                st.session_state['loaded_dfs'][i]['volumosos'].remove(seq)
+                        st.rerun() # Adiciona rerun para atualizar a contagem de volumosos no info
+
+                st.info(f"**{len(volumosos_set)}** de **{len(sequences_sorted)}** pacotes marcados como volumosos nesta gaiola.")
+                
+                st.markdown("##### Marcação Individual")
+                with st.container(height=250):
+                    # Marcação individual por checkbox
+                    for seq_id in sequences_sorted:
+                        is_checked = seq_id in volumosos_set
+                        st.checkbox(
+                            f"Seq: {seq_id}", 
+                            value=is_checked, 
+                            key=f"vol_{gaiola_code}_{seq_id}",
+                            on_change=update_volumoso_set, 
+                            args=(seq_id, not is_checked, i) 
+                        )
+        
+        # ----------------------------------------------------------------------------------
+        # 1.3 UNIFICAÇÃO, CORREÇÃO E PROCESSAMENTO FINAL
+        # ----------------------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("1.3 Unificar e Processar Rotas")
+        
+        limite_similaridade_ajustado = st.slider(
+            'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+            min_value=80,
+            max_value=100,
+            value=100, 
+            step=1,
+            help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
+        )
+        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
+        
+        
+        if st.button("🚀 UNIFICAR, CORRIGIR E AGRUPAR PARA CIRCUIT", key="btn_pre_final_run"):
+            
+            df_final_list = []
+            
+            # 1. Unificação e Aplicação do Asterisco (*) e ID_UNICO
+            for item in st.session_state['loaded_dfs']:
+                # Pula se o DF não foi carregado corretamente
+                if item['df'] is None:
+                    continue
+                    
+                df_proc = item['df'].copy()
+                gaiola = item['gaiola']
+                volumosos = item['volumosos']
+                
+                # Cria a coluna ID_UNICO sem o asterisco inicial
+                df_proc[COLUNA_ID_UNICO] = df_proc[COLUNA_GAIOLA].astype(str) + '-' + df_proc[COLUNA_SEQUENCE].astype(str)
+
+                # Aplica o * (asterisco) no ID_UNICO se a Sequence original estiver no set de volumosos
+                for seq_volumoso in volumosos:
+                    str_seq_volumoso = str(seq_volumoso)
+                    
+                    # Filtra os registros que correspondem àquela SEQUENCE e GAIOLA
+                    df_proc.loc[
+                        (df_proc[COLUNA_SEQUENCE] == str_seq_volumoso) & (df_proc[COLUNA_GAIOLA] == gaiola), 
+                        COLUNA_ID_UNICO
+                    ] = df_proc[COLUNA_ID_UNICO] + '*'
+
+                df_final_list.append(df_proc)
+                
+            if not df_final_list:
+                st.error("Não há planilhas válidas e processadas para unificar. Carregue os arquivos e clique em 'Confirmar Gaiolas'.")
+                # Se falhar aqui, não prossegue
+            else:
+                # CONCATENAÇÃO FINAL: Junta todos os DataFrames (com ID_UNICO já marcado)
+                df_unificado = pd.concat(df_final_list, ignore_index=True)
+                st.session_state['df_unificado_final'] = df_unificado.copy()
+                
+                # 2. Iniciar o processamento e agrupamento (Fuzzy Matching, Agrupamento e Ordenação)
+                df_circuit, df_processado_completo = processar_e_corrigir_dados(
+                    st.session_state['df_unificado_final'], 
+                    limite_similaridade_ajustado
+                )
+                
+                if df_circuit is not None:
+                    st.markdown("---")
+                    st.header("✅ Resultado Concluído!")
+                    
+                    total_entradas = len(st.session_state['df_unificado_final'])
+                    total_agrupados = len(df_circuit)
+                    
+                    st.metric(
+                        label="Endereços Únicos Agrupados",
+                        value=total_agrupados,
+                        delta=f"-{total_entradas - total_agrupados} pacotes agrupados"
+                    )
+                    
+                    # --- SAÍDA 1: ARQUIVO PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                    st.subheader("Arquivo para Roteirização (Circuit)")
+                    st.dataframe(df_circuit, use_container_width=True)
+                    
+                    buffer_circuit = io.BytesIO()
+                    with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                        df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                    buffer_circuit.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                        data=buffer_circuit,
+                        file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_excel_circuit"
+                    )
+                    
+                    # --- SAÍDA 2: PLANILHA DE VOLUMOSOS SEPARADA ---
+                    df_volumosos = df_processado_completo[
+                        df_processado_completo[COLUNA_ID_UNICO].astype(str).str.contains(r'\*', regex=True, na=False)
+                    ].copy()
+                    
+                    df_volumosos['Sort_Key'] = df_volumosos[COLUNA_SEQUENCE].astype(str).str.replace(r'\*|\s', '', regex=True)
+                    df_volumosos['Sort_Key'] = pd.to_numeric(df_volumosos['Sort_Key'], errors='coerce')
+                    df_volumosos = df_volumosos.sort_values(by=['Gaiola', 'Sort_Key']).drop(columns=['Sort_Key'])
+
+                    if not df_volumosos.empty:
+                        st.markdown("---")
+                        st.subheader("Planilha de APENAS Volumosos (Pacotes com *)")
+                        st.caption(f"Contém **{len(df_volumosos)}** itens marcados com *. Ordenado por Gaiola e Sequência Original.")
+
+                        df_vol_export = df_volumosos[[
+                            COLUNA_ID_UNICO, 
+                            COLUNA_GAIOLA, 
+                            COLUNA_SEQUENCE, 
+                            COLUNA_ENDERECO, 
+                            'Bairro', 
+                            'City', 
+                            'Zipcode/Postal code',
+                            'Endereco_Corrigido'
+                        ]].copy()
+                        
+                        df_vol_export.columns = [
+                            'ID Único (Gaiola-Seq*)', 
+                            'Gaiola',
+                            'Nº da Sequência Original',
+                            'Endereço Original', 
+                            'Bairro', 
+                            'Cidade', 
+                            'CEP', 
+                            'Endereço Corrigido/Agrupado'
+                        ]
+
+                        st.dataframe(df_vol_export, use_container_width=True)
+                        
+                        buffer_vol = io.BytesIO()
+                        with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer:
+                            df_vol_export.to_excel(writer, index=False, sheet_name='Volumosos')
+                        buffer_vol.seek(0)
+                        
+                        st.download_button(
+                            label="📥 Baixar PLANILHA APENAS VOLUMOSOS",
+                            data=buffer_vol,
+                            file_name="Volumosos_Marcados.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="download_excel_volumosos"
+                        )
+
+    else:
+        # Se não houver DFs prontos, garantir que o resultado final seja limpo
+        st.session_state['df_unificado_final'] = None
+
+
+# ----------------------------------------------------------------------------------
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ----------------------------------------------------------------------------------
+
+with tab2:
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+
+    st.markdown("---")
+    st.subheader("2.1 Carregar Arquivo da Rota")
+
+    uploaded_file_pos = st.file_uploader(
+        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="file_pos"
+    )
+
+    sheet_name_default = "Table 3" 
+    sheet_name = sheet_name_default
+    
+    df_raw_pos = None 
+    df_extracted = None 
+    copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+
+    if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
+        sheet_name = st.text_input(
+            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
+            value=st.session_state.get('sheet_name_pos', sheet_name_default),
+            key="sheet_name_pos_input"
+        )
+        st.session_state['sheet_name_pos'] = sheet_name 
+    
+    if uploaded_file_pos is not None:
+        try:
+            current_sheet_name = sheet_name if uploaded_file_pos.name.endswith('.xlsx') else None
+
+            if uploaded_file_pos.name.endswith('.csv'):
+                df_raw_pos = pd.read_csv(uploaded_file_pos, encoding='utf-8')
+            else:
+                df_raw_pos = pd.read_excel(uploaded_file_pos, sheet_name=current_sheet_name)
+            
+            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_raw_pos)}** registros.")
+            
+            df_extracted = extract_circuit_info(df_raw_pos)
+
+            if df_extracted is not None and not df_extracted.empty:
+                st.markdown("---")
+                st.subheader("2.2 Lista Completa (Para Cópia/Impressão)")
+                
+                df_visualizacao = df_extracted[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
+                df_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
+                st.dataframe(df_visualizacao, use_container_width=True)
+
+                copia_data = '\n'.join(df_extracted['Lista de Impressão'].astype(str).tolist())
+            
+            else:
+                 copia_data = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
+
+
+        except KeyError as ke:
+            if "Table 3" in str(ke) or "Sheet" in str(ke): 
+                st.error(f"Erro de Aba: A aba **'{current_sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
+            elif 'notes' in str(ke) or '#' in str(ke):
+                 st.error(f"Erro de Coluna: O arquivo da rota deve conter as colunas **#** (Sequência de Parada) e **Notes**. Verifique o arquivo de rota.")
+            else:
+                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao processar o arquivo. Erro: {e}")
+            
+    
+    if uploaded_file_pos is not None:
+        st.markdown("### 2.3 Copiar Lista Completa para a Área de Transferência")
+        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
+        
+        st.text_area(
+            "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
+            copia_data, 
+            height=300,
+            key="text_area_completa"
+        )
+
+        if df_extracted is not None and not df_extracted.empty:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                df_extracted[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao')
+            buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Baixar Lista Limpa COMPLETA (Excel)",
+                data=buffer,
+                file_name="Lista_Ordem_Impressao_COMPLETA.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Baixe este arquivo. Contém todos os itens da rota.",
+                key="download_list_completa"
+            )
+
+
+    st.markdown("---")
+    st.header("📦 2.4 Filtrar Apenas Volumosos (Mantendo a Sequência)")
+
+    if df_extracted is not None and not df_extracted.empty:
+        
+        if st.button("✨ Mostrar APENAS Pacotes Volumosos (*)", key="btn_filtro_volumosos"):
+            
+            df_volumosos = df_extracted[
+                df_extracted['Ordem ID'].astype(str).str.contains(r'\*', regex=True, na=False)
+            ].copy() 
+            
+            if not df_volumosos.empty:
+                st.success(f"Filtro aplicado! Encontrados **{len(df_volumosos)}** paradas com itens volumosos.")
+
+                copia_data_volumosos = '\n'.join(df_volumosos['Lista de Impressão'].astype(str).tolist())
+                
+                st.subheader("Lista de Volumosos Filtrada (Sequência do Circuit)")
+
+                df_vol_visualizacao = df_volumosos[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
+                df_vol_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
+                st.dataframe(
+                    df_vol_visualizacao, 
+                    use_container_width=True
+                )
+
+                st.markdown("### Copiar Lista de Volumosos")
+                st.text_area(
+                    "Conteúdo da Lista de Volumosos (Alinhado à Esquerda):",

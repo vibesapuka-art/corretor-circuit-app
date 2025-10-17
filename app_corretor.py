@@ -171,6 +171,122 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # 6. Formatação do DF para o CIRCUIT 
+    # >>> BLOCO QUE CAUSOU O ERRO ESTÁ CORRIGIDO AQUI <<<
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado'].str.strip() # Remove
+        df_agrupado['Bairro_Agrupado'].str.strip() # Remove espaços extras
+    )
+    # >>> FIM DO BLOCO CORRIGIDO <<<
+    
+    # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
+    
+    notas_completas = (
+        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
+        ' | Cidade: ' + df_agrupado['City'] + 
+        ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
+    )
+
+    df_circuit = pd.DataFrame({
+        'Order ID': df_agrupado['Sequences_Agrupadas'], 
+        'Address': endereco_completo_circuit, 
+        'Latitude': df_agrupado['Latitude'], 
+        'Longitude': df_agrupado['Longitude'], 
+        'Notes': notas_completas
+    })
+    
+    return df_circuit
+
+
+# ===============================================
+# FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ===============================================
+
+def extract_circuit_info(df_input_raw):
+    """
+    Processa o DataFrame da rota do Circuit (raw) para extrair o Order ID e Anotações.
+    """
+    df = df_input_raw.copy()
+    
+    # 1. Padronização de Colunas
+    df.columns = df.columns.str.strip().str.lower()
+    
+    # Garante que colunas essenciais existam
+    if 'notes' not in df.columns or '#' not in df.columns:
+        raise KeyError("O arquivo da rota deve conter as colunas '#' (Sequência de Parada) e 'Notes'.")
+
+    # 2. Processa Notes para obter o ID agrupado (que pode ter o *)
+    df['notes'] = df['notes'].astype(str).str.strip('"')
+    df = df.dropna(subset=['notes']) 
+    
+    # Divide a coluna na primeira ocorrência de ';'
+    df_split = df['notes'].str.split(';', n=1, expand=True)
+    # O ID agrupado (ex: "12,13*") é a primeira parte.
+    df['Ordem ID'] = df_split[0].str.strip().str.strip('"') 
+    
+    # Anotações completas (o resto da string)
+    df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
+    
+    # 3. Formata a Lista de Impressão
+    df['Lista de Impressão'] = (
+        df['Ordem ID'].astype(str) + 
+        ' - ' + 
+        df['Anotações Completas'].astype(str)
+    )
+    
+    return df
+
+def processar_rota_para_impressao(df_input_raw):
+    """ Retorna apenas a coluna formatada para cópia (Lista de Impressão) """
+    df_extracted = extract_circuit_info(df_input_raw)
+    return df_extracted[['Lista de Impressão']]
+
+
+# ===============================================
+# INTERFACE PRINCIPAL
+# ===============================================
+
+st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
+
+# CRIAÇÃO DAS ABAS 
+tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
+
+
+# ----------------------------------------------------------------------------------
+# ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
+# ----------------------------------------------------------------------------------
+
+with tab1:
+    st.header("1. Gerar Arquivo para Importar no Circuit")
+    st.caption("Esta etapa corrige erros de digitação, marca volumes e agrupa pedidos.")
+
+    # Inicializa o estado para armazenar o DataFrame e as ordens marcadas
+    if 'df_original' not in st.session_state:
+        st.session_state['df_original'] = None
+    if 'volumoso_ids' not in st.session_state:
+        st.session_state['volumoso_ids'] = set() 
+    if 'last_uploaded_name' not in st.session_state:
+         st.session_state['last_uploaded_name'] = None
+    
+    st.markdown("---")
+    st.subheader("1.1 Carregar Planilha Original")
+
+    uploaded_file_pre = st.file_uploader(
+        "Arraste e solte o arquivo original (CSV/Excel) aqui:", 
+        type=['csv', 'xlsx'],
+        key="file_pre"
+    )
+
+    if uploaded_file_pre is not None:
+        try:
+            if uploaded_file_pre.name.endswith('.csv'):
+                # Usando um encoding mais robusto para CSV
+                df_input_pre = pd.read_csv(uploaded_file_pre, encoding='utf-8')
+            else:
+                df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
+            
+            # --- VALIDAÇÃO DE COLUNAS ---
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
+            for col in colunas_essenciais:
+                 if col not in df_input_pre.columns:
+                     #

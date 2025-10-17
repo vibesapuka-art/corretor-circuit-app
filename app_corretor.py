@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pandas as pd
 import re
 from rapidfuzz import process, fuzz
@@ -13,7 +14,6 @@ st.set_page_config(
 )
 
 # --- CSS Simplificado para evitar TypeError e garantir alinhamento ---
-# O bloco CSS foi simplificado para resolver o erro 'TypeError'
 st.markdown("""
 <style>
 /* Força o alinhamento à esquerda no campo de texto principal */
@@ -415,10 +415,14 @@ with tab1:
                 col_start, col_end, col_button_mark, col_button_unmark = st.columns([1.5, 1.5, 2, 2])
                 
                 # --- Marcação em Faixa ---
+                # Garante valores padrão se a lista de sequências for vazia
+                start_default = sequences_sorted[0] if len(sequences_sorted) > 0 else "1"
+                end_default = sequences_sorted[-1] if len(sequences_sorted) > 0 else "1"
+                
                 with col_start:
-                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=sequences_sorted[0] if len(sequences_sorted) > 0 else 1, key=f"start_seq_vol_{i}")
+                    start_seq = st.text_input(f"Início da Faixa (Seq)", value=start_default, key=f"start_seq_vol_{i}")
                 with col_end:
-                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=sequences_sorted[-1] if len(sequences_sorted) > 0 else 1, key=f"end_seq_vol_{i}")
+                    end_seq = st.text_input(f"Fim da Faixa (Seq)", value=end_default, key=f"end_seq_vol_{i}")
                 
                 
                 # Função de helper para encontrar sequências numéricas entre o range (mesmo que sejam strings)
@@ -443,15 +447,15 @@ with tab1:
                         sequences_to_mark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
                         for seq in sequences_to_mark:
                             st.session_state['loaded_dfs'][i]['volumosos'].add(seq)
-                        # Não fazemos rerun, a mudança é refletida no estado e reexibida
-                        
+                        st.rerun() # Adiciona rerun para atualizar a contagem de volumosos no info
+
                 with col_button_unmark:
                     if st.button("Limpar Faixa", key=f"btn_unmark_range_{i}"):
                         sequences_to_unmark = get_sequences_in_range(df_current, COLUNA_SEQUENCE, start_seq, end_seq)
                         for seq in sequences_to_unmark:
                             if seq in st.session_state['loaded_dfs'][i]['volumosos']:
                                 st.session_state['loaded_dfs'][i]['volumosos'].remove(seq)
-                        # Não fazemos rerun, a mudança é refletida no estado e reexibida
+                        st.rerun() # Adiciona rerun para atualizar a contagem de volumosos no info
 
                 st.info(f"**{len(volumosos_set)}** de **{len(sequences_sorted)}** pacotes marcados como volumosos nesta gaiola.")
                 
@@ -516,250 +520,91 @@ with tab1:
                 
             if not df_final_list:
                 st.error("Não há planilhas válidas e processadas para unificar. Carregue os arquivos e clique em 'Confirmar Gaiolas'.")
-                return # Sai da função se a lista estiver vazia
-
-            # CONCATENAÇÃO FINAL: Junta todos os DataFrames (com ID_UNICO já marcado)
-            df_unificado = pd.concat(df_final_list, ignore_index=True)
-            st.session_state['df_unificado_final'] = df_unificado.copy()
-            
-            # 2. Iniciar o processamento e agrupamento (Fuzzy Matching, Agrupamento e Ordenação)
-            df_circuit, df_processado_completo = processar_e_corrigir_dados(
-                st.session_state['df_unificado_final'], 
-                limite_similaridade_ajustado
-            )
-            
-            if df_circuit is not None:
-                st.markdown("---")
-                st.header("✅ Resultado Concluído!")
+                # Se falhar aqui, não prossegue
+            else:
+                # CONCATENAÇÃO FINAL: Junta todos os DataFrames (com ID_UNICO já marcado)
+                df_unificado = pd.concat(df_final_list, ignore_index=True)
+                st.session_state['df_unificado_final'] = df_unificado.copy()
                 
-                total_entradas = len(st.session_state['df_unificado_final'])
-                total_agrupados = len(df_circuit)
-                
-                st.metric(
-                    label="Endereços Únicos Agrupados",
-                    value=total_agrupados,
-                    delta=f"-{total_entradas - total_agrupados} pacotes agrupados"
+                # 2. Iniciar o processamento e agrupamento (Fuzzy Matching, Agrupamento e Ordenação)
+                df_circuit, df_processado_completo = processar_e_corrigir_dados(
+                    st.session_state['df_unificado_final'], 
+                    limite_similaridade_ajustado
                 )
                 
-                # --- SAÍDA 1: ARQUIVO PARA CIRCUIT (ROTEIRIZAÇÃO) ---
-                st.subheader("Arquivo para Roteirização (Circuit)")
-                st.dataframe(df_circuit, use_container_width=True)
-                
-                buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
-                buffer_circuit.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
-                    data=buffer_circuit,
-                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_excel_circuit"
-                )
-                
-                # --- SAÍDA 2: PLANILHA DE VOLUMOSOS SEPARADA ---
-                df_volumosos = df_processado_completo[
-                    df_processado_completo[COLUNA_ID_UNICO].astype(str).str.contains(r'\*', regex=True, na=False)
-                ].copy()
-                
-                df_volumosos['Sort_Key'] = df_volumosos[COLUNA_SEQUENCE].astype(str).str.replace(r'\*|\s', '', regex=True)
-                df_volumosos['Sort_Key'] = pd.to_numeric(df_volumosos['Sort_Key'], errors='coerce')
-                df_volumosos = df_volumosos.sort_values(by=['Gaiola', 'Sort_Key']).drop(columns=['Sort_Key'])
-
-                if not df_volumosos.empty:
+                if df_circuit is not None:
                     st.markdown("---")
-                    st.subheader("Planilha de APENAS Volumosos (Pacotes com *)")
-                    st.caption(f"Contém **{len(df_volumosos)}** itens marcados com *. Ordenado por Gaiola e Sequência Original.")
-
-                    df_vol_export = df_volumosos[[
-                        COLUNA_ID_UNICO, 
-                        COLUNA_GAIOLA, 
-                        COLUNA_SEQUENCE, 
-                        COLUNA_ENDERECO, 
-                        'Bairro', 
-                        'City', 
-                        'Zipcode/Postal code',
-                        'Endereco_Corrigido'
-                    ]].copy()
+                    st.header("✅ Resultado Concluído!")
                     
-                    df_vol_export.columns = [
-                        'ID Único (Gaiola-Seq*)', 
-                        'Gaiola',
-                        'Nº da Sequência Original',
-                        'Endereço Original', 
-                        'Bairro', 
-                        'Cidade', 
-                        'CEP', 
-                        'Endereço Corrigido/Agrupado'
-                    ]
-
-                    st.dataframe(df_vol_export, use_container_width=True)
+                    total_entradas = len(st.session_state['df_unificado_final'])
+                    total_agrupados = len(df_circuit)
                     
-                    buffer_vol = io.BytesIO()
-                    with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer:
-                        df_vol_export.to_excel(writer, index=False, sheet_name='Volumosos')
-                    buffer_vol.seek(0)
+                    st.metric(
+                        label="Endereços Únicos Agrupados",
+                        value=total_agrupados,
+                        delta=f"-{total_entradas - total_agrupados} pacotes agrupados"
+                    )
+                    
+                    # --- SAÍDA 1: ARQUIVO PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                    st.subheader("Arquivo para Roteirização (Circuit)")
+                    st.dataframe(df_circuit, use_container_width=True)
+                    
+                    buffer_circuit = io.BytesIO()
+                    with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                        df_circuit.to_excel(writer, index=False, sheet_name='Circuit Import')
+                    buffer_circuit.seek(0)
                     
                     st.download_button(
-                        label="📥 Baixar PLANILHA APENAS VOLUMOSOS",
-                        data=buffer_vol,
-                        file_name="Volumosos_Marcados.xlsx",
+                        label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                        data=buffer_circuit,
+                        file_name="Circuit_Import_FINAL_MARCADO.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_excel_volumosos"
+                        key="download_excel_circuit"
                     )
+                    
+                    # --- SAÍDA 2: PLANILHA DE VOLUMOSOS SEPARADA ---
+                    df_volumosos = df_processado_completo[
+                        df_processado_completo[COLUNA_ID_UNICO].astype(str).str.contains(r'\*', regex=True, na=False)
+                    ].copy()
+                    
+                    df_volumosos['Sort_Key'] = df_volumosos[COLUNA_SEQUENCE].astype(str).str.replace(r'\*|\s', '', regex=True)
+                    df_volumosos['Sort_Key'] = pd.to_numeric(df_volumosos['Sort_Key'], errors='coerce')
+                    df_volumosos = df_volumosos.sort_values(by=['Gaiola', 'Sort_Key']).drop(columns=['Sort_Key'])
 
-    else:
-        # Se não houver DFs prontos, garantir que o resultado final seja limpo
-        st.session_state['df_unificado_final'] = None
+                    if not df_volumosos.empty:
+                        st.markdown("---")
+                        st.subheader("Planilha de APENAS Volumosos (Pacotes com *)")
+                        st.caption(f"Contém **{len(df_volumosos)}** itens marcados com *. Ordenado por Gaiola e Sequência Original.")
 
+                        df_vol_export = df_volumosos[[
+                            COLUNA_ID_UNICO, 
+                            COLUNA_GAIOLA, 
+                            COLUNA_SEQUENCE, 
+                            COLUNA_ENDERECO, 
+                            'Bairro', 
+                            'City', 
+                            'Zipcode/Postal code',
+                            'Endereco_Corrigido'
+                        ]].copy()
+                        
+                        df_vol_export.columns = [
+                            'ID Único (Gaiola-Seq*)', 
+                            'Gaiola',
+                            'Nº da Sequência Original',
+                            'Endereço Original', 
+                            'Bairro', 
+                            'Cidade', 
+                            'CEP', 
+                            'Endereço Corrigido/Agrupado'
+                        ]
 
-# ----------------------------------------------------------------------------------
-# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
-# ----------------------------------------------------------------------------------
-
-with tab2:
-    st.header("2. Limpar Saída do Circuit para Impressão")
-    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
-
-    st.markdown("---")
-    st.subheader("2.1 Carregar Arquivo da Rota")
-
-    uploaded_file_pos = st.file_uploader(
-        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
-        type=['csv', 'xlsx'],
-        key="file_pos"
-    )
-
-    sheet_name_default = "Table 3" 
-    sheet_name = sheet_name_default
-    
-    df_raw_pos = None 
-    df_extracted = None 
-    copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
-
-    if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
-        sheet_name = st.text_input(
-            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=st.session_state.get('sheet_name_pos', sheet_name_default),
-            key="sheet_name_pos_input"
-        )
-        st.session_state['sheet_name_pos'] = sheet_name 
-    
-    if uploaded_file_pos is not None:
-        try:
-            current_sheet_name = sheet_name if uploaded_file_pos.name.endswith('.xlsx') else None
-
-            if uploaded_file_pos.name.endswith('.csv'):
-                df_raw_pos = pd.read_csv(uploaded_file_pos, encoding='utf-8')
-            else:
-                df_raw_pos = pd.read_excel(uploaded_file_pos, sheet_name=current_sheet_name)
-            
-            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_raw_pos)}** registros.")
-            
-            df_extracted = extract_circuit_info(df_raw_pos)
-
-            if df_extracted is not None and not df_extracted.empty:
-                st.markdown("---")
-                st.subheader("2.2 Lista Completa (Para Cópia/Impressão)")
-                
-                df_visualizacao = df_extracted[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
-                st.dataframe(df_visualizacao, use_container_width=True)
-
-                copia_data = '\n'.join(df_extracted['Lista de Impressão'].astype(str).tolist())
-            
-            else:
-                 copia_data = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
-
-
-        except KeyError as ke:
-            if "Table 3" in str(ke) or "Sheet" in str(ke): 
-                st.error(f"Erro de Aba: A aba **'{current_sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
-            elif 'notes' in str(ke) or '#' in str(ke):
-                 st.error(f"Erro de Coluna: O arquivo da rota deve conter as colunas **#** (Sequência de Parada) e **Notes**. Verifique o arquivo de rota.")
-            else:
-                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
-        except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Erro: {e}")
-            
-    
-    if uploaded_file_pos is not None:
-        st.markdown("### 2.3 Copiar Lista Completa para a Área de Transferência")
-        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
-        
-        st.text_area(
-            "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
-            copia_data, 
-            height=300,
-            key="text_area_completa"
-        )
-
-        if df_extracted is not None and not df_extracted.empty:
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                df_extracted[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao')
-            buffer.seek(0)
-            
-            st.download_button(
-                label="📥 Baixar Lista Limpa COMPLETA (Excel)",
-                data=buffer,
-                file_name="Lista_Ordem_Impressao_COMPLETA.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Baixe este arquivo. Contém todos os itens da rota.",
-                key="download_list_completa"
-            )
-
-
-    st.markdown("---")
-    st.header("📦 2.4 Filtrar Apenas Volumosos (Mantendo a Sequência)")
-
-    if df_extracted is not None and not df_extracted.empty:
-        
-        if st.button("✨ Mostrar APENAS Pacotes Volumosos (*)", key="btn_filtro_volumosos"):
-            
-            df_volumosos = df_extracted[
-                df_extracted['Ordem ID'].astype(str).str.contains(r'\*', regex=True, na=False)
-            ].copy() 
-            
-            if not df_volumosos.empty:
-                st.success(f"Filtro aplicado! Encontrados **{len(df_volumosos)}** paradas com itens volumosos.")
-
-                copia_data_volumosos = '\n'.join(df_volumosos['Lista de Impressão'].astype(str).tolist())
-                
-                st.subheader("Lista de Volumosos Filtrada (Sequência do Circuit)")
-
-                df_vol_visualizacao = df_volumosos[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_vol_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
-                st.dataframe(
-                    df_vol_visualizacao, 
-                    use_container_width=True
-                )
-
-                st.markdown("### Copiar Lista de Volumosos")
-                st.text_area(
-                    "Conteúdo da Lista de Volumosos (Alinhado à Esquerda):", 
-                    copia_data_volumosos, 
-                    height=200,
-                    key="text_area_volumosos"
-                )
-
-                buffer_vol = io.BytesIO()
-                with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer: 
-                    df_volumosos[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
-                buffer_vol.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar Lista de Volumosos FILTRADA (Excel)",
-                    data=buffer_vol,
-                    file_name="Lista_Ordem_Volumosos_FILTRADA.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Baixe este arquivo. Contém apenas os itens volumosos, mantendo a sequência da rota.",
-                    key="download_list_volumosos"
-                )
-            
-            else:
-                st.warning("Nenhuma parada na rota contém pacotes marcados com * (volumosos).")
-
-    else:
-        st.info("Carregue e processe um arquivo de rota do Circuit na seção 2.1 para habilitar o filtro.")
+                        st.dataframe(df_vol_export, use_container_width=True)
+                        
+                        buffer_vol = io.BytesIO()
+                        with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer:
+                            df_vol_export.to_excel(writer, index=False, sheet_name='Volumosos')
+                        buffer_vol.seek(0)
+                        
+                        st.download_button(
+                            label="📥 Baixar PLANILHA APENAS VOLUMOSOS",
+                            data

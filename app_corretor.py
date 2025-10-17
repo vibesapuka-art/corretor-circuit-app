@@ -127,7 +127,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
                 limit=None
             )
             
-            # Linha 130 CORRIGIDA para eliminar a ambiguidade de identação
             grupo_matches = [match[0] for match in matches if match[1] >= limite_similaridade]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
@@ -139,4 +138,42 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             for end_similar in grupo_matches:
                 mapa_correcao[end_similar] = endereco_oficial_original
                 
-        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unic
+            # LINHA 142 CORRIGIDA: Garante que a f-string seja completa
+            progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+    
+    progresso_bar.empty()
+    st.success("Fuzzy Matching concluído!")
+
+    # 3. Aplicação do Endereço Corrigido
+    df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
+
+    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE)
+    colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
+    
+    df_agrupado = df.groupby(colunas_agrupamento).agg(
+        # Agrupa as sequências (que já contêm o *)
+        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
+        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
+        Latitude=(COLUNA_LATITUDE, 'first'),
+        Longitude=(COLUNA_LONGITUDE, 'first'),
+        
+        # CORREÇÃO CHAVE: Usando a função auxiliar para Bairro, que lida com grupos vazios.
+        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
+        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
+        
+        # Captura o menor número de sequência original (sem *) para ordenação
+        Min_Sequence=('Sequence_Num', 'min') 
+        
+    ).reset_index()
+
+    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
+    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
+    
+    # 6. Formatação do DF para o CIRCUIT 
+    endereco_completo_circuit = (
+        df_agrupado['Endereco_Corrigido'] + ', ' + 
+        df_agrupado['Bairro_Agrupado'].str.strip() # Remove espaços extras
+    )
+    
+    # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex

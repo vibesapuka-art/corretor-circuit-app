@@ -80,7 +80,6 @@ def get_most_common_or_empty(x):
     x_limpo = x.dropna()
     if x_limpo.empty:
         return ""
-    # iloc[0] é mais robusto que [0] em alguns ambientes
     return x_limpo.mode().iloc[0]
 
 
@@ -126,8 +125,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
                 scorer=fuzz.WRatio, 
                 limit=None
             )
-            
-            grupo_matches = [match[0] for match in matches if match[1] >= limite_similaridade]
+            grupo_matches = [
+                match[0] for match in matches 
+                if match[1] >= limite_similaridade
+            ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
             endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
@@ -138,7 +139,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
             for end_similar in grupo_matches:
                 mapa_correcao[end_similar] = endereco_oficial_original
                 
-            progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
     
     progresso_bar.empty()
     st.success("Fuzzy Matching concluído!")
@@ -173,11 +174,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado'].str.strip() # Remove espaços extras
     )
-    
     # Limpa vírgulas duplas que podem surgir se o Bairro for vazio: "Endereço, , Cidade"
-    # ESTA LINHA ESTAVA COM O ERRO SyntaxError: '(' was never closed
-    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex
-
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
+    
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
@@ -199,44 +198,41 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
 # ===============================================
 
-def extract_circuit_info(df_input_raw):
+def processar_rota_para_impressao(df_input):
     """
-    Processa o DataFrame da rota do Circuit (raw) para extrair o Order ID e Anotações.
+    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     """
-    df = df_input_raw.copy()
+    coluna_notes_lower = 'notes'
     
-    # 1. Padronização de Colunas
-    df.columns = df.columns.str.strip().str.lower()
+    if coluna_notes_lower not in df_input.columns:
+        # A mensagem de erro será tratada no bloco try/except da interface
+        raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
     
-    # Garante que colunas essenciais existam
-    if 'notes' not in df.columns or '#' not in df.columns:
-        raise KeyError("O arquivo da rota deve conter as colunas '#' (Sequência de Parada) e 'Notes'.")
-
-    # 2. Processa Notes para obter o ID agrupado (que pode ter o *)
-    df['notes'] = df['notes'].astype(str).str.strip('"')
-    df = df.dropna(subset=['notes']) 
+    df = df_input.copy()
+    df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
+    df = df.dropna(subset=[coluna_notes_lower]) 
+    
+    # 2. Separar a coluna Notes: Parte antes do ';' é o Order ID
+    df[coluna_notes_lower] = df[coluna_notes_lower].str.strip('"')
     
     # Divide a coluna na primeira ocorrência de ';'
-    df_split = df['notes'].str.split(';', n=1, expand=True)
-    # O ID agrupado (ex: "12,13*") é a primeira parte.
-    df['Ordem ID'] = df_split[0].str.strip().str.strip('"') 
-    
-    # Anotações completas (o resto da string)
+    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
+    df['Ordem ID'] = df_split[0].str.strip()
     df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
     
-    # 3. Formata a Lista de Impressão
+    
+    # 3. Formatação Final da Tabela (APENAS ID e ANOTAÇÕES)
+    # GERAÇÃO DA COLUNA ÚNICA FORMATADA PARA CÓPIA/EXCEL
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
         df['Anotações Completas'].astype(str)
     )
     
-    return df
-
-def processar_rota_para_impressao(df_input_raw):
-    """ Retorna apenas a coluna formatada para cópia (Lista de Impressão) """
-    df_extracted = extract_circuit_info(df_input_raw)
-    return df_extracted[['Lista de Impressão']]
+    # Apenas retorna a coluna formatada
+    df_final = df[['Lista de Impressão']]
+    
+    return df_final
 
 
 # ===============================================
@@ -262,8 +258,6 @@ with tab1:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
         st.session_state['volumoso_ids'] = set() 
-    if 'last_uploaded_name' not in st.session_state:
-         st.session_state['last_uploaded_name'] = None
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -277,8 +271,7 @@ with tab1:
     if uploaded_file_pre is not None:
         try:
             if uploaded_file_pre.name.endswith('.csv'):
-                # Usando um encoding mais robusto para CSV
-                df_input_pre = pd.read_csv(uploaded_file_pre, encoding='utf-8')
+                df_input_pre = pd.read_csv(uploaded_file_pre)
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
@@ -286,7 +279,7 @@ with tab1:
             colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
             for col in colunas_essenciais:
                  if col not in df_input_pre.columns:
-                     raise KeyError(f"A coluna '{col}' está faltando na sua planilha. Verifique maiúsculas/minúsculas e espaços.")
+                     raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
             # Resetar as marcações se um novo arquivo for carregado
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
@@ -301,15 +294,14 @@ with tab1:
              st.error(f"Erro de Coluna: {ke}")
              st.session_state['df_original'] = None
         except Exception as e:
-            # Captura erros de leitura (como encoding ou openpyxl faltando)
-            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato ou se o '{uploaded_file_pre.name}' está corrompido. Erro: {e}")
+            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
 
     
     # ----------------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
     
-    if st.session_state.get('df_original') is not None:
+    if st.session_state['df_original'] is not None:
         
         # --- ORDENAÇÃO NUMÉRICA FORÇADA ---
         df_temp = st.session_state['df_original'].copy()
@@ -380,10 +372,7 @@ with tab1:
                 ] = str_id_volumoso + '*'
 
             # 2. Iniciar o processamento e agrupamento
-            df_circuit = processar_e_corrigir_dados(
-                df_para_processar, 
-                limite_similaridade_ajustado
-            )
+            df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
             
             if df_circuit is not None:
                 st.markdown("---")
@@ -444,9 +433,7 @@ with tab2:
     sheet_name_default = "Table 3" 
     sheet_name = sheet_name_default
     
-    df_raw_pos = None # DataFrame bruto carregado
-    df_extracted = None # DataFrame processado para extração de IDs
-    
+    df_final_pos = None # Inicializa para o escopo da aba
     # Inicializa com uma mensagem para garantir que a text_area não falhe
     copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
 
@@ -457,137 +444,80 @@ with tab2:
             "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
             value=sheet_name_default
         )
-    
-    # --- Lógica de Carregamento e Processamento Inicial ---
+
     if uploaded_file_pos is not None:
         try:
             if uploaded_file_pos.name.endswith('.csv'):
-                 # Usando um encoding mais robusto para CSV
-                df_raw_pos = pd.read_csv(uploaded_file_pos, encoding='utf-8')
+                df_input_pos = pd.read_csv(uploaded_file_pos)
             else:
-                df_raw_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
+                # Usa a sheet_name que pode ter sido atualizada pelo st.text_input
+                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
-            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_raw_pos)}** registros.")
-            
-            # Processa para extrair IDs
-            df_extracted = extract_circuit_info(df_raw_pos)
+            # --- CORREÇÃO ESSENCIAL: PADRONIZAÇÃO DE COLUNAS ---
+            df_input_pos.columns = df_input_pos.columns.str.strip() 
+            df_input_pos.columns = df_input_pos.columns.str.lower()
+            # ---------------------------------------------------
 
-            if df_extracted is not None and not df_extracted.empty:
-                
-                # 2.2 Resultado Final (Lista de Impressão de TODOS os itens)
+            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
+            
+            # Processa os dados
+            df_final_pos = processar_rota_para_impressao(df_input_pos)
+            
+            if df_final_pos is not None and not df_final_pos.empty:
                 st.markdown("---")
-                st.subheader("2.2 Lista Completa (Para Cópia/Impressão)")
-                st.caption("A lista abaixo contém *TODOS* os itens da rota. Use a área de texto ou o download para cópia rápida.")
+                st.subheader("2.2 Resultado Final (Lista de Impressão)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
-                # Exibe a tabela
-                df_visualizacao = df_extracted[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_visualizacao.columns = ['#', 'ID Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
-                st.dataframe(df_visualizacao, use_container_width=True)
+                # Exibe a tabela (agora com apenas uma coluna formatada)
+                st.dataframe(df_final_pos, use_container_width=True)
 
                 # --- LÓGICA DE COPIA PARA TEXT AREA ---
-                copia_data = '\n'.join(df_extracted['Lista de Impressão'].astype(str).tolist())
+                
+                # CORREÇÃO FINAL PARA REMOVER PADDING: Usa join() para garantir alinhamento 100% esquerdo
+                copia_data = '\n'.join(df_final_pos['Lista de Impressão'].astype(str).tolist())
+                
             
             else:
+                 # Mensagem se o arquivo foi lido, mas a lista final está vazia
                  copia_data = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
 
 
         except KeyError as ke:
-            if "Table 3" in str(ke) or "Sheet" in str(ke): 
+             # Captura erros de coluna ou aba
+            if "Table 3" in str(ke) or "Sheet" in str(ke): # Incluindo Sheet para mensagens genéricas de erro de aba
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
-            elif 'notes' in str(ke) or '#' in str(ke):
-                 st.error(f"Erro de Coluna: O arquivo da rota deve conter as colunas **#** (Sequência de Parada) e **Notes**. Verifique o arquivo de rota.")
+            elif 'notes' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
             else:
                  st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:
             st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
             
     
-    # --- 2.3 Área de Cópia e Download da Lista COMPLETA ---
-    if df_extracted is not None:
-        st.markdown("### 2.3 Copiar Lista Completa para a Área de Transferência")
+    # Renderização da área de cópia e download
+    if uploaded_file_pos is not None:
+        st.markdown("### 2.3 Copiar para a Área de Transferência")
         st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
         
         st.text_area(
             "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
             copia_data, 
-            height=300,
-            key="text_area_completa"
+            height=300
         )
 
-        if not df_extracted.empty:
+        # O botão de download só aparece se o df_final_pos não for nulo/vazio
+        if df_final_pos is not None and not df_final_pos.empty:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                df_extracted[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao')
+                df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Baixar Lista Limpa COMPLETA (Excel)",
+                label="📥 Baixar Lista Limpa (Excel) - Coluna Única",
                 data=buffer,
-                file_name="Lista_Ordem_Impressao_COMPLETA.xlsx",
+                file_name="Lista_Ordem_Impressao_UNICA.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Baixe este arquivo. Contém todos os itens da rota.",
-                key="download_list_completa"
+                help="Baixe este arquivo. A coluna de dados agora está formatada como texto único (ID - Anotações), o que garante o alinhamento esquerdo ao copiar do Excel.",
+                key="download_list"
             )
 
-
-    # ----------------------------------------------------------------------------------
-    # 2.4 FILTRO DE VOLUMOSOS (NOVA FUNCIONALIDADE)
-    # ----------------------------------------------------------------------------------
-    st.markdown("---")
-    st.header("📦 2.4 Filtrar Apenas Volumosos (Mantendo a Sequência)")
-
-    if df_extracted is not None and not df_extracted.empty:
-        
-        # O botão que o usuário deve clicar para ver a lista de volumosos
-        if st.button("✨ Mostrar APENAS Pacotes Volumosos (*)", key="btn_filtro_volumosos"):
-            
-            # FILTRAGEM: O Order ID tem que conter o * (asterisco)
-            df_volumosos = df_extracted[
-                df_extracted['Ordem ID'].astype(str).str.contains(r'\*', regex=True, na=False)
-            ].copy() # Usar .copy() para evitar SettingWithCopyWarning
-            
-            if not df_volumosos.empty:
-                st.success(f"Filtro aplicado! Encontrados **{len(df_volumosos)}** paradas com itens volumosos.")
-
-                # Formata a lista de impressão dos volumosos (apenas a coluna)
-                copia_data_volumosos = '\n'.join(df_volumosos['Lista de Impressão'].astype(str).tolist())
-                
-                st.subheader("Lista de Volumosos Filtrada (Sequência do Circuit)")
-                st.caption("A tabela abaixo mostra apenas as paradas que contêm pacotes marcados com *. A coluna **#** mostra a sequência original do Circuit.")
-
-                # Exibe a tabela filtrada
-                df_vol_visualizacao = df_volumosos[['#', 'Lista de Impressão', 'Address', 'Estimated Arrival Time']].copy()
-                df_vol_visualizacao.columns = ['#', 'ID Agrupado - Anotações', 'Endereço da Parada', 'Chegada Estimada']
-                st.dataframe(
-                    df_vol_visualizacao, 
-                    use_container_width=True
-                )
-
-                st.markdown("### Copiar Lista de Volumosos")
-                st.text_area(
-                    "Conteúdo da Lista de Volumosos (Alinhado à Esquerda):", 
-                    copia_data_volumosos, 
-                    height=200,
-                    key="text_area_volumosos"
-                )
-
-                # Download Volumosos
-                buffer_vol = io.BytesIO()
-                with pd.ExcelWriter(buffer_vol, engine='openpyxl') as writer: 
-                    df_volumosos[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
-                buffer_vol.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar Lista de Volumosos FILTRADA (Excel)",
-                    data=buffer_vol,
-                    file_name="Lista_Ordem_Volumosos_FILTRADA.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    help="Baixe este arquivo. Contém apenas os itens volumosos, mantendo a sequência da rota.",
-                    key="download_list_volumosos"
-                )
-            
-            else:
-                st.warning("Nenhuma parada na rota contém pacotes marcados com * (volumosos).")
-
-    else:
-        st.info("Carregue e processe um arquivo de rota do Circuit na seção 2.1 para habilitar o filtro.")

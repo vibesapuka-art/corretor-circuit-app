@@ -81,6 +81,7 @@ def get_most_common_or_empty(x):
 def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     """
     Função principal que aplica a correção e o agrupamento.
+    A chamada do process.extract foi forçada a ser em uma linha para evitar o SyntaxError.
     """
     # Adicionando tratamento para o caso de a coluna ID_UNICO ainda não existir (apenas para segurança)
     colunas_essenciais_base = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code', COLUNA_GAIOLA]
@@ -121,6 +122,65 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     if total_unicos > 0:
         for i, end_principal in enumerate(enderecos_unicos):
             if end_principal not in mapa_correcao:
-                matches = process.extract(
-                    end_principal, 
-                    enderecos_unicos,
+                # CORREÇÃO DE SINTAXE: Chamada em uma linha
+                matches = process.extract(end_principal, enderecos_unicos, scorer=fuzz.WRatio, limit=None)
+                
+                grupo_matches = [match[0] for match in matches if match[1] >= limite_similaridade]
+                
+                df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
+                endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
+                if not endereco_oficial_original:
+                    endereco_oficial_original = end_principal 
+                
+                for end_similar in grupo_matches:
+                    mapa_correcao[end_similar] = endereco_oficial_original
+                    
+                progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+        
+        progresso_bar.empty()
+        st.success("Fuzzy Matching concluído!")
+    else:
+        progresso_bar.empty()
+        st.warning("Nenhum endereço encontrado para processar.")
+
+
+    # 3. Aplicação do Endereço Corrigido
+    df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
+
+    # 4. Agrupamento (POR ENDEREÇO CORRIGIDO E CIDADE)
+    colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
+    
+    df_agrupado = df.groupby(colunas_agrupamento).agg(
+        # Agrupa os IDs ÚNICOS (Gaiola-Sequence) que já contêm o '*'
+        Sequences_Agrupadas=(COLUNA_ID_UNICO, 
+                             lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'[^\d]', '', str(y).split('-')[-1])) if re.sub(r'[^\d]', '', str(y).split('-')[-1]).isdigit() else float('inf'))))
+                            ), 
+        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
+        Latitude=(COLUNA_LATITUDE, 'first'),
+        Longitude=(COLUNA_LONGITUDE, 'first'),
+        
+        # Agrupa as informações comuns
+        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
+        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
+        
+        # Agrupa as gaiolas (mantém TODAS as gaiolas únicas daquele endereço)
+        Gaiola_Agrupada=(COLUNA_GAIOLA, lambda x: ','.join(sorted(x.unique()))),
+        
+        # Captura o menor número de sequência original (sem *) para ordenação
+        Min_Sequence=('Sequence_Num', 'min') 
+        
+    ).reset_index()
+
+    # 5. ORDENAÇÃO: Ordena o DataFrame pelo menor número de sequência. (CRUCIAL!)
+    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
+    
+    # 6. Formatação do DF para o CIRCUIT 
+    endereco_completo_circuit = (
+        df_agrupado['Endereco_Corrigido'] + ', ' + 
+        df_agrupado['Bairro_Agrupado'].str.strip() 
+    )
+    
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
+    
+    # Incluindo TODAS as Gaiolas nas Notas!
+    notas_completas =

@@ -126,7 +126,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
                 scorer=fuzz.WRatio, 
                 limit=None
             )
-            grupo_matches =
+            grupo_matches = []
                 match[0] for match in matches 
                 if match
+
 

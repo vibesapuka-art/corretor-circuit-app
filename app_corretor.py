@@ -13,21 +13,24 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS DE ÚLTIMO RECURSO (Simplificado e em aspas simples triplas) ---
-st.markdown('''
-<style>
+# --- CSS DE ÚLTIMO RECURSO (Simplificado e em CHAMADAS SEPARADAS) ---
+# Este bloco foi reescrito para evitar o erro "TypeError" no st.markdown('''...''')
+st.markdown("<style>", unsafe_html=True)
+st.markdown("""
 /* Alinha o texto dentro do st.text_area para a esquerda */
 textarea {
     text-align: left !important;
     font-family: monospace;
     white-space: pre-wrap;
 }
+""", unsafe_html=True)
+st.markdown("""
 /* Garante que títulos e outros elementos fiquem alinhados à esquerda */
 h1, h2, h3, h4, .stMarkdown {
     text-align: left !important;
 }
-</style>
-''', unsafe_html=True)
+""", unsafe_html=True)
+st.markdown("</style>", unsafe_html=True)
 # --------------------------------------------------------------------------------------
 
 
@@ -704,7 +707,7 @@ with tab3:
                 st.markdown("---")
                 st.subheader("3.2 Lista Completa (Para Cópia/Impressão)")
                 
-                # CORREÇÃO APLICADA AQUI (Remoção da coluna 'Estimated Arrival Time')
+                # CORREÇÃO: Removendo 'Estimated Arrival Time' para evitar KeyError
                 df_visualizacao = df_extracted[['#', 'Lista de Impressão', 'Address']].copy()
                 df_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada']
                 st.dataframe(df_visualizacao, use_container_width=True)
@@ -771,7 +774,7 @@ with tab3:
                 
                 st.subheader("Lista de Volumosos Filtrada (Sequência do Circuit)")
 
-                # CORREÇÃO APLICADA AQUI (Remoção da coluna 'Estimated Arrival Time')
+                # CORREÇÃO: Removendo 'Estimated Arrival Time' para evitar KeyError
                 df_vol_visualizacao = df_volumosos[['#', 'Lista de Impressão', 'Address']].copy()
                 df_vol_visualizacao.columns = ['# Parada', 'ID(s) Agrupado - Anotações', 'Endereço da Parada']
                 st.dataframe(

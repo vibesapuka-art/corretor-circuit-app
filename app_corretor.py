@@ -201,6 +201,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    
+    RETORNA: 
+    - df_final_geral: Lista de impressão de todos os pedidos.
+    - df_volumosos: Lista de impressão APENAS dos pedidos que contêm '*' (volumosos).
     """
     coluna_notes_lower = 'notes'
     
@@ -212,7 +216,7 @@ def processar_rota_para_impressao(df_input):
     df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
     df = df.dropna(subset=[coluna_notes_lower]) 
     
-    # 2. Separar a coluna Notes: Parte antes do ';' é o Order ID
+    # 2. Separar a coluna Notes: Parte antes do ';' é o Order ID (que contém o *)
     df[coluna_notes_lower] = df[coluna_notes_lower].str.strip('"')
     
     # Divide a coluna na primeira ocorrência de ';'
@@ -222,17 +226,20 @@ def processar_rota_para_impressao(df_input):
     
     
     # 3. Formatação Final da Tabela (APENAS ID e ANOTAÇÕES)
-    # GERAÇÃO DA COLUNA ÚNICA FORMATADA PARA CÓPIA/EXCEL
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
         df['Anotações Completas'].astype(str)
     )
     
-    # Apenas retorna a coluna formatada
-    df_final = df[['Lista de Impressão']]
+    # DataFrame FINAL GERAL
+    df_final_geral = df[['Lista de Impressão']]
     
-    return df_final
+    # 4. FILTRAR VOLUMOSOS: Cria um DF separado APENAS para volumosos
+    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True)].copy()
+    df_volumosos_impressao = df_volumosos[['Lista de Impressão']]
+    
+    return df_final_geral, df_volumosos_impressao
 
 
 # ===============================================
@@ -387,9 +394,7 @@ with tab1:
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
                 
-                # -------------------------------------------------------------------------------------------------
-                # 💥 NOVO BLOCO DE LÓGICA: SEPARAÇÃO E DOWNLOAD COM DUAS ABAS
-                # -------------------------------------------------------------------------------------------------
+                # --- LÓGICA DE DUAS ABAS PARA DOWNLOAD (MANUTENÇÃO DA FUNÇÃO) ---
                 
                 # 1. FILTRAR DADOS PARA A NOVA ABA "APENAS_VOLUMOSOS"
                 # Filtra o DataFrame agrupado para identificar as linhas que contêm '*' no Order ID
@@ -423,10 +428,7 @@ with tab1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )
-                
-                # -------------------------------------------------------------------------------------------------
-                # 💥 FIM DO NOVO BLOCO
-                # -------------------------------------------------------------------------------------------------
+                # --- FIM DO BLOCO DE DUAS ABAS ---
 
     # Limpa a sessão se o arquivo for removido
     elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
@@ -437,7 +439,7 @@ with tab1:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -456,9 +458,12 @@ with tab2:
     sheet_name_default = "Table 3" 
     sheet_name = sheet_name_default
     
-    df_final_pos = None # Inicializa para o escopo da aba
+    df_final_geral = None # Inicializa para o escopo da aba
+    df_volumosos_impressao = None # Novo DF para volumosos
+    
     # Inicializa com uma mensagem para garantir que a text_area não falhe
-    copia_data = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+    copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+    copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
 
     # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
@@ -483,26 +488,39 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # Processa os dados
-            df_final_pos = processar_rota_para_impressao(df_input_pos)
+            # Processa os dados (agora retorna 2 DFs)
+            df_final_geral, df_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
-            if df_final_pos is not None and not df_final_pos.empty:
+            if df_final_geral is not None and not df_final_geral.empty:
                 st.markdown("---")
-                st.subheader("2.2 Resultado Final (Lista de Impressão)")
+                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
                 st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
-                # Exibe a tabela (agora com apenas uma coluna formatada)
-                st.dataframe(df_final_pos, use_container_width=True)
+                # Exibe a tabela GERAL
+                st.dataframe(df_final_geral, use_container_width=True)
 
-                # --- LÓGICA DE COPIA PARA TEXT AREA ---
-                
                 # CORREÇÃO FINAL PARA REMOVER PADDING: Usa join() para garantir alinhamento 100% esquerdo
-                copia_data = '\n'.join(df_final_pos['Lista de Impressão'].astype(str).tolist())
+                copia_data_geral = '\n'.join(df_final_geral['Lista de Impressão'].astype(str).tolist())
                 
+                
+                # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
+                st.markdown("---")
+                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
+                
+                if not df_volumosos_impressao.empty:
+                    st.success(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
+                    st.dataframe(df_volumosos_impressao, use_container_width=True)
+                    
+                    # Gera o texto para cópia dos volumosos
+                    copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
+
             
             else:
                  # Mensagem se o arquivo foi lido, mas a lista final está vazia
-                 copia_data = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
+                 copia_data_geral = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
 
 
         except KeyError as ke:
@@ -517,29 +535,48 @@ with tab2:
             st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
             
     
-    # Renderização da área de cópia e download
+    # Renderização das áreas de cópia e download
     if uploaded_file_pos is not None:
-        st.markdown("### 2.3 Copiar para a Área de Transferência")
+        
+        # --- ÁREA DE CÓPIA GERAL ---
+        st.markdown("### 2.3 Copiar para a Área de Transferência (Lista GERAL)")
         st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
         
         st.text_area(
-            "Conteúdo da Lista de Impressão (Alinhado à Esquerda):", 
-            copia_data, 
-            height=300
+            "Conteúdo da Lista de Impressão GERAL (Alinhado à Esquerda):", 
+            copia_data_geral, 
+            height=300,
+            key="text_area_geral"
         )
-
-        # O botão de download só aparece se o df_final_pos não for nulo/vazio
-        if df_final_pos is not None and not df_final_pos.empty:
+        
+        # --- ÁREA DE CÓPIA VOLUMOSOS ---
+        if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS Volumosos)")
+            st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos.")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_volumosos, 
+                height=150,
+                key="text_area_volumosos"
+            )
+        
+        
+        # --- BOTÕES DE DOWNLOAD ---
+        if df_final_geral is not None and not df_final_geral.empty:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                df_final_pos.to_excel(writer, index=False, sheet_name='Lista Impressao')
+                df_final_geral.to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
+                if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
+                    df_volumosos_impressao.to_excel(writer, index=False, sheet_name='Lista Volumosos')
+                    
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Baixar Lista Limpa (Excel) - Coluna Única",
+                label="📥 Baixar Lista Limpa (Excel) - Geral + Volumosos",
                 data=buffer,
-                file_name="Lista_Ordem_Impressao_UNICA.xlsx",
+                file_name="Lista_Ordem_Impressao_FINAL.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Baixe este arquivo. A coluna de dados agora está formatada como texto único (ID - Anotações), o que garante o alinhamento esquerdo ao copiar do Excel.",
+                help="Baixe este arquivo. Ele contém duas abas: a lista geral e a lista separada somente com os volumosos.",
                 key="download_list"
             )

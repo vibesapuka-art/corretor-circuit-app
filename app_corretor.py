@@ -380,12 +380,13 @@ with tab1:
     if st.session_state.get('df_original') is not None:
         
         st.markdown("---")
-        st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+        st.subheader("1.2 Marcar Pacotes Volumosos por Gaiola (Volumosos = *)")
         
         df_temp = st.session_state['df_original'].copy()
         
-        # Lista os IDs ÚNICOS (Gaiola-Sequence) para a marcação
-        ordens_unicas_sorted = df_temp[COLUNA_ID_UNICO].astype(str).unique()
+        # 1. Agrupar IDs Únicos por Gaiola
+        grupos_por_gaiola = df_temp.groupby(COLUNA_GAIOLA)[COLUNA_ID_UNICO].unique().apply(list).to_dict()
+        gaiolas_unicas_ordenadas = sorted(grupos_por_gaiola.keys())
         
         # Função de ordenação customizada para o checkbox: ordena pelo número da Sequence dentro do ID_UNICO
         def sort_key_custom(id_unico):
@@ -398,37 +399,82 @@ with tab1:
             except:
                 return float('inf')
 
-        ordens_unicas_sorted = sorted(ordens_unicas_sorted, key=sort_key_custom)
-        # ----------------------------------------------------------------
+        # 2. Funções de Callback (Mantidas/Ajustadas)
         
-        
-        # Função de callback para atualizar o set de IDs volumosos
-        # O ID volumoso agora é o ID_UNICO (Ex: 'A1-1')
+        # Função de callback para atualizar o set de IDs volumosos (individual)
         def update_volumoso_ids(id_unico, is_checked):
             if is_checked:
                 st.session_state['volumoso_ids'].add(id_unico)
             elif id_unico in st.session_state['volumoso_ids']:
                 st.session_state['volumoso_ids'].remove(id_unico)
 
+        # Função de callback para selecionar/desselecionar TODOS em UMA GAIOLA
+        def toggle_all_by_gaiola(gaiola_id, ids_da_gaiola):
+            ids_selecionados_na_gaiola = set(ids_da_gaiola).intersection(st.session_state['volumoso_ids'])
+            
+            # Se nem todos estão selecionados (ou nenhum), seleciona todos.
+            if len(ids_selecionados_na_gaiola) < len(ids_da_gaiola):
+                # Adiciona todos da gaiola
+                st.session_state['volumoso_ids'].update(ids_da_gaiola)
+            else:
+                # Remove todos da gaiola
+                st.session_state['volumoso_ids'].difference_update(ids_da_gaiola)
+
+
         st.caption("Marque os **IDs Únicos (Gaiola-Sequência)** das ordens de serviço que são volumosas (serão marcadas com *):")
 
-        # Container para os checkboxes
-        with st.container(height=300):
-            # Itera pela lista ordenada e exibe um checkbox por ID ÚNICO
-            for id_unico in ordens_unicas_sorted:
+        # 3. Criação da Interface por Gaiola
+        
+        # Usa um contêiner com rolagem se houver muitas gaiolas
+        with st.container(height=500):
+            
+            for gaiola in gaiolas_unicas_ordenadas:
+                ids_da_gaiola = grupos_por_gaiola[gaiola]
+                # Ordena os IDs da gaiola
+                ids_da_gaiola_ordenados = sorted(ids_da_gaiola, key=sort_key_custom)
                 
-                is_checked = id_unico in st.session_state['volumoso_ids']
+                # Conta quantos estão marcados para o título do expander
+                ids_selecionados_na_gaiola = set(ids_da_gaiola_ordenados).intersection(st.session_state['volumoso_ids'])
+                num_marcados = len(ids_selecionados_na_gaiola)
                 
-                st.checkbox(
-                    str(id_unico), 
-                    value=is_checked, 
-                    key=f"vol_{id_unico}",
-                    on_change=update_volumoso_ids, 
-                    args=(id_unico, not is_checked) 
-                )
+                # Título do Expander
+                expander_title = f"📦 Gaiola: **{gaiola}** ({num_marcados}/{len(ids_da_gaiola_ordenados)} pacotes)"
+                
+                with st.expander(expander_title):
+                    
+                    # Adiciona a marcação individual por gaiola
+                    is_all_gaiola_checked = num_marcados == len(ids_da_gaiola_ordenados)
+                    toggle_gaiola_label = "✅ Desselecionar TODOS desta gaiola" if is_all_gaiola_checked else "➕ Selecionar TODOS desta gaiola"
+
+                    st.button(
+                        toggle_gaiola_label,
+                        key=f"btn_toggle_all_{gaiola}",
+                        on_change=toggle_all_by_gaiola,
+                        args=(gaiola, ids_da_gaiola_ordenados),
+                        help=f"Marca ou desmarca todos os pacotes da gaiola {gaiola}."
+                    )
+                    
+                    st.markdown("---")
+                    
+                    # Colunas para exibir os checkboxes lado a lado
+                    cols = st.columns(3) # Exibe 3 colunas de checkboxes
+                    
+                    for i, id_unico in enumerate(ids_da_gaiola_ordenados):
+                        col = cols[i % 3] # Distribui entre as 3 colunas
+                        
+                        is_checked = id_unico in st.session_state['volumoso_ids']
+                        
+                        col.checkbox(
+                            str(id_unico), 
+                            value=is_checked, 
+                            key=f"vol_{id_unico}",
+                            on_change=update_volumoso_ids, 
+                            # O argumento 'is_checked' no on_change deve ser o estado FUTURO, por isso usamos 'not is_checked'
+                            args=(id_unico, not is_checked) 
+                        )
 
 
-        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos (ID Único).")
+        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos (ID Único) no total.")
         
         st.markdown("---")
         st.subheader("1.3 Configurar e Processar")

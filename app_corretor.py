@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import pandas as pd
 import re
 from rapidfuzz import process, fuzz
@@ -13,6 +14,8 @@ st.set_page_config(
 )
 
 # --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
+# AVISO: Este bloco pode causar "TypeError: Argument of type 'float' is not iterable" 
+# e fazer a interface sumir em alguns ambientes Streamlit Cloud. 
 st.markdown("""
 <style>
 /* Alinha o texto de entrada na caixa de texto (útil para formulários) */
@@ -92,8 +95,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
+            # O erro é propagado, e a interface deve tratar o retorno None
             st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
-            return None
+            return None, None # Retorna None para df_circuit e df_processado_completo
 
     df = df_entrada.copy()
     
@@ -117,6 +121,11 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
     # 2. Fuzzy Matching para Agrupamento
     progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching...")
     total_unicos = len(enderecos_unicos)
+    if total_unicos == 0:
+        progresso_bar.empty()
+        st.warning("Nenhum endereço encontrado para processar.")
+        return None, None
+    
     for i, end_principal in enumerate(enderecos_unicos):
         if end_principal not in mapa_correcao:
             matches = process.extract(
@@ -157,7 +166,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         
-        # CORREÇÃO CHAVE: Usando a função auxiliar para Bairro, que lida com grupos vazios.
+        # Usando a função auxiliar para Bairro, que lida com grupos vazios.
         Bairro_Agrupado=('Bairro', get_most_common_or_empty),
         Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         
@@ -191,7 +200,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade):
         'Notes': notas_completas
     })
     
-    return df_circuit
+    return df_circuit, df # Retorna o df_processado_completo para uso na Aba 1, se necessário
 
 
 # ===============================================
@@ -205,6 +214,7 @@ def processar_rota_para_impressao(df_input):
     RETORNA: 
     - df_final_geral: Lista de impressão de todos os pedidos.
     - df_volumosos: Lista de impressão APENAS dos pedidos que contêm '*' (volumosos).
+    - df_nao_volumosos: Lista de impressão APENAS dos pedidos que NÃO contêm '*' (não-volumosos).
     """
     coluna_notes_lower = 'notes'
     
@@ -233,13 +243,17 @@ def processar_rota_para_impressao(df_input):
     )
     
     # DataFrame FINAL GERAL
-    df_final_geral = df[['Lista de Impressão']]
+    df_final_geral = df[['Lista de Impressão', 'address']].copy() # Adiciona 'address' para a visualização
     
     # 4. FILTRAR VOLUMOSOS: Cria um DF separado APENAS para volumosos
     df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True)].copy()
-    df_volumosos_impressao = df_volumosos[['Lista de Impressão']]
+    df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() # Adiciona 'address' para a visualização
     
-    return df_final_geral, df_volumosos_impressao
+    # 5. FILTRAR NÃO-VOLUMOSOS: Cria um DF separado APENAS para não-volumosos
+    df_nao_volumosos = df[~df['Ordem ID'].str.contains(r'\*', regex=True)].copy() # Usa o operador de negação (~)
+    df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
+    
+    return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
 
 
 # ===============================================
@@ -329,7 +343,7 @@ with tab1:
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
 
         # Container para os checkboxes
-        with st.container():
+        with st.container(height=300): # Definindo altura para melhor visualização
              # Itera pela lista ordenada e exibe um checkbox por linha (Ordem 1, 2, 3...)
             for order_id in ordens_originais_sorted:
                 
@@ -379,7 +393,7 @@ with tab1:
                 ] = str_id_volumoso + '*'
 
             # 2. Iniciar o processamento e agrupamento
-            df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
+            df_circuit, df_processado_completo = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado)
             
             if df_circuit is not None:
                 st.markdown("---")
@@ -393,8 +407,6 @@ with tab1:
                     value=total_agrupados,
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
-                
-                # --- LÓGICA DE DUAS ABAS PARA DOWNLOAD (MANUTENÇÃO DA FUNÇÃO) ---
                 
                 # 1. FILTRAR DADOS PARA A NOVA ABA "APENAS_VOLUMOSOS"
                 # Filtra o DataFrame agrupado para identificar as linhas que contêm '*' no Order ID
@@ -460,10 +472,12 @@ with tab2:
     
     df_final_geral = None # Inicializa para o escopo da aba
     df_volumosos_impressao = None # Novo DF para volumosos
+    df_nao_volumosos_impressao = None # Novo DF para não-volumosos
     
     # Inicializa com uma mensagem para garantir que a text_area não falhe
     copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
     copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
+    copia_data_nao_volumosos = "Nenhum pacote não-volumoso encontrado na rota."
 
     # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
@@ -488,8 +502,8 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # Processa os dados (agora retorna 2 DFs)
-            df_final_geral, df_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
+            # Processa os dados (agora retorna 3 DFs: Geral, Volumosos, Não-Volumosos)
+            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
                 st.markdown("---")
@@ -497,19 +511,43 @@ with tab2:
                 st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
                 # Exibe a tabela GERAL
-                st.dataframe(df_final_geral, use_container_width=True)
+                df_visualizacao_geral = df_final_geral.copy()
+                df_visualizacao_geral.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                st.dataframe(df_visualizacao_geral, use_container_width=True)
 
                 # CORREÇÃO FINAL PARA REMOVER PADDING: Usa join() para garantir alinhamento 100% esquerdo
                 copia_data_geral = '\n'.join(df_final_geral['Lista de Impressão'].astype(str).tolist())
                 
                 
+                # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
+                st.markdown("---")
+                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
+                
+                if not df_nao_volumosos_impressao.empty:
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos nesta rota.")
+                    
+                    # Exibe a tabela NÃO-VOLUMOSOS
+                    df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
+                    df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_nao_vol, use_container_width=True)
+                    
+                    # Gera o texto para cópia dos não-volumosos
+                    copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Todos os pedidos nesta rota estão marcados como volumosos ou a lista está vazia.")
+                    
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")
                 st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
                 
                 if not df_volumosos_impressao.empty:
-                    st.success(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
-                    st.dataframe(df_volumosos_impressao, use_container_width=True)
+                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
+                    
+                    # Exibe a tabela VOLUMOSOS
+                    df_visualizacao_vol = df_volumosos_impressao.copy()
+                    df_visualizacao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_vol, use_container_width=True)
                     
                     # Gera o texto para cópia dos volumosos
                     copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
@@ -517,7 +555,7 @@ with tab2:
                 else:
                     st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
 
-            
+
             else:
                  # Mensagem se o arquivo foi lido, mas a lista final está vazia
                  copia_data_geral = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
@@ -529,8 +567,11 @@ with tab2:
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
             elif 'notes' in str(ke):
                  st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
+            elif 'address' in str(ke):
+                 # Este erro é capturado pela padronização to_lower, mas ainda assim é bom deixar claro.
+                 st.error(f"Erro de Coluna: A coluna 'Address' (ou 'address') não foi encontrada. Verifique o arquivo de rota.")
             else:
-                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
+                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {e}")
         except Exception as e:
             st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
             
@@ -548,10 +589,22 @@ with tab2:
             height=300,
             key="text_area_geral"
         )
+
+        # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
+        if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (sem o '*').")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_nao_volumosos, 
+                height=150,
+                key="text_area_nao_volumosos"
+            )
         
         # --- ÁREA DE CÓPIA VOLUMOSOS ---
         if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
-            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS Volumosos)")
+            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
             st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos.")
             
             st.text_area(
@@ -566,17 +619,22 @@ with tab2:
         if df_final_geral is not None and not df_final_geral.empty:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                df_final_geral.to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
+                # Remove a coluna temporária 'address' antes de salvar o Excel
+                df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
+                
+                if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
+                    df_nao_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Nao Volumosos')
+                    
                 if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
-                    df_volumosos_impressao.to_excel(writer, index=False, sheet_name='Lista Volumosos')
+                    df_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
                     
             buffer.seek(0)
             
             st.download_button(
-                label="📥 Baixar Lista Limpa (Excel) - Geral + Volumosos",
+                label="📥 Baixar Lista Limpa (Excel) - Geral + Separadas",
                 data=buffer,
                 file_name="Lista_Ordem_Impressao_FINAL.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                help="Baixe este arquivo. Ele contém duas abas: a lista geral e a lista separada somente com os volumosos.",
+                help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
                 key="download_list"
             )

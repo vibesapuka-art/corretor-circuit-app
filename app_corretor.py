@@ -9,7 +9,7 @@ import sqlite3
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Configurações Iniciais da Página ---
-# ATENÇÃO: Corrigido o erro de digitação no nome da função (set_page_page_config -> set_page_config)
+# Usando st.set_page_config
 st.set_page_config(
     page_title="Circuit Flow Completo",
     layout="wide",
@@ -88,7 +88,6 @@ def create_table_if_not_exists(conn):
     );
     """
     try:
-        # Usa o método .execute() da conexão do st.experimental_connection
         conn.execute(query)
     except Exception as e:
          # Captura e exibe qualquer erro de execução do SQL
@@ -245,4 +244,254 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_END
+            
+            # CORRIGIDO: Certificando-se de que a linha não contém erros de colchetes abertos.
+            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
+            
+            if not endereco_oficial_original:
+                 endereco_oficial_original = end_principal 
+            
+            for end_similar in grupo_matches:
+                mapa_correcao[end_similar] = endereco_oficial_original
+                
+        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+    
+    progresso_bar.empty()
+    st.success("Fuzzy Matching concluído!")
+
+    # Aplicação do Endereço Corrigido (Chave de Agrupamento)
+    df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
+
+    # Agrupamento (Chave: Endereço Corrigido + Cidade)
+    colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
+    
+    df_agrupado = df.groupby(colunas_agrupamento).agg(
+        # Lista de todos os Endereços Originais do Cliente que foram agrupados
+        Enderecos_Originais=(COLUNA_ENDERECO, lambda x: ', '.join(x.astype(str).unique())),
+        
+        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
+        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
+        # Mantém a geoloc (que pode ter sido corrigida pelo cache)
+        Latitude=(COLUNA_LATITUDE, 'first'),
+        Longitude=(COLUNA_LONGITUDE, 'first'),
+        
+        # Dados de Suporte
+        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
+        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
+        
+        Min_Sequence=('Sequence_Num', 'min') 
+        
+    ).reset_index()
+
+    # Ordenação
+    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
+    
+    # Formatação do DF para o CIRCUIT 
+    endereco_completo_circuit = (
+        df_agrupado['Endereco_Corrigido'] + ', ' + 
+        df_agrupado['Bairro_Agrupado'].str.strip() 
+    )
+    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
+    
+    notas_completas = (
+        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
+        ' | Cidade: ' + df_agrupado['City'] + 
+        ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
+    )
+
+    # CORREÇÃO: Chave '}' faltante e colchetes verificados.
+    df_circuit = pd.DataFrame({
+        'Order ID': df_agrupado['Sequences_Agrupadas'], 
+        'Address': endereco_completo_circuit, 
+        'Latitude': df_agrupado['Latitude'], 
+        'Longitude': df_agrupado['Longitude'], 
+        'Notes': notas_completas
+    }) 
+    
+    # Retorna o DF do Circuit E o DF Agrupado para revisão de Geoloc
+    return df_circuit, df_agrupado[['Enderecos_Originais', 'Latitude', 'Longitude']].copy()
+
+
+# ===============================================
+# FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ===============================================
+
+def processar_rota_para_impressao(df_input):
+    """
+    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    """
+    coluna_notes_lower = 'notes'
+    
+    if coluna_notes_lower not in df_input.columns:
+        raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.")
+    
+    df = df_input.copy()
+    df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
+    df = df.dropna(subset=[coluna_notes_lower]) 
+    
+    df[coluna_notes_lower] = df[coluna_notes_lower].str.strip('"')
+    
+    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
+    df['Ordem ID'] = df_split[0].str.strip()
+    df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
+    
+    df['Lista de Impressão'] = (
+        df['Ordem ID'].astype(str) + 
+        ' - ' + 
+        df['Anotações Completas'].astype(str)
+    )
+    
+    # DataFrame FINAL GERAL
+    df_final_geral = df[['Lista de Impressão', 'address']].copy() 
+    
+    # FILTRAR VOLUMOSOS
+    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True)].copy()
+    df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
+    
+    # FILTRAR NÃO-VOLUMOSOS
+    df_nao_volumosos = df[~df['Ordem ID'].str.contains(r'\*', regex=True)].copy() 
+    df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
+    
+    return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
+
+
+# ===============================================
+# INTERFACE PRINCIPAL
+# ===============================================
+
+# 1. Conexão com o Banco de Dados (Executada uma vez)
+conn = get_db_connection()
+create_table_if_not_exists(conn)
+
+st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
+
+# CRIAÇÃO DAS ABAS 
+tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
+
+
+# ----------------------------------------------------------------------------------
+# ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
+# ----------------------------------------------------------------------------------
+
+with tab1:
+    st.header("1. Gerar Arquivo para Importar no Circuit")
+    st.caption("Esta etapa aplica o **Cache de Geolocalização** e agrupa os endereços.")
+
+    # Inicializa o estado
+    if 'df_original' not in st.session_state:
+        st.session_state['df_original'] = None
+    if 'volumoso_ids' not in st.session_state:
+        st.session_state['volumoso_ids'] = set() 
+    if 'df_agrupado_para_edicao' not in st.session_state:
+        st.session_state['df_agrupado_para_edicao'] = None
+
+    
+    st.markdown("---")
+    st.subheader("1.1 Carregar Planilha Original")
+
+    uploaded_file_pre = st.file_uploader(
+        "Arraste e solte o arquivo original (CSV/Excel) aqui:", 
+        type=['csv', 'xlsx'],
+        key="file_pre"
+    )
+
+    if uploaded_file_pre is not None:
+        try:
+            if uploaded_file_pre.name.endswith('.csv'):
+                df_input_pre = pd.read_csv(uploaded_file_pre)
+            else:
+                df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
+            
+            # --- VALIDAÇÃO DE COLUNAS ---
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
+            for col in colunas_essenciais:
+                 if col not in df_input_pre.columns:
+                     raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
+            
+            # Resetar as marcações se um novo arquivo for carregado
+            if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
+                 st.session_state['volumoso_ids'] = set()
+                 st.session_state['last_uploaded_name'] = uploaded_file_pre.name
+                 st.session_state['df_agrupado_para_edicao'] = None
+
+
+            st.session_state['df_original'] = df_input_pre.copy()
+            st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
+            
+        except KeyError as ke:
+             st.error(f"Erro de Coluna: {ke}")
+             st.session_state['df_original'] = None
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
+
+    
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+    
+    if st.session_state['df_original'] is not None:
+        
+        df_temp = st.session_state['df_original'].copy()
+        df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
+        ordens_originais_sorted = df_temp.sort_values('Order_Num')[COLUNA_SEQUENCE].astype(str).unique()
+        
+        def update_volumoso_ids(order_id, is_checked):
+            if is_checked:
+                st.session_state['volumoso_ids'].add(order_id)
+            elif order_id in st.session_state['volumoso_ids']:
+                st.session_state['volumoso_ids'].remove(order_id)
+
+        st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
+
+        # Container para os checkboxes
+        with st.container(height=300):
+            cols = st.columns(5)
+            col_index = 0
+            for order_id in ordens_originais_sorted:
+                with cols[col_index % 5]:
+                    is_checked = order_id in st.session_state['volumoso_ids']
+                    st.checkbox(
+                        str(order_id), 
+                        value=is_checked, 
+                        key=f"vol_{order_id}",
+                        on_change=update_volumoso_ids, 
+                        args=(order_id, not is_checked) 
+                    )
+                col_index += 1
+
+
+        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
+        
+        st.markdown("---")
+        st.subheader("1.3 Configurar e Processar")
+        
+        limite_similaridade_ajustado = st.slider(
+            'Ajuste a Precisão do Corretor (Fuzzy Matching):',
+            min_value=80,
+            max_value=100,
+            value=100, 
+            step=1,
+            help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
+        )
+        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
+        
+        
+        if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final"):
+            
+            # 1. Aplicar a marcação * no DF antes de processar
+            df_para_processar = st.session_state['df_original'].copy()
+            df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
+            
+            for id_volumoso in st.session_state['volumoso_ids']:
+                str_id_volumoso = str(id_volumoso)
+                df_para_processar.loc[
+                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                    COLUNA_SEQUENCE
+                ] = str_id_volumoso + '*'
+
+            # 2. Carregar Cache de Geolocalização
+            df_cache = load_geoloc_cache(conn)
+
+            # 3. Iniciar o processamento e agrupamento
+            with st.spinner('Processando dados, aplicando cache e agrupando...'):
+                 df_

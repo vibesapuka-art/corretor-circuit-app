@@ -7,6 +7,7 @@ import streamlit as st
 import sqlite3 
 # Importação de st_aggrid (mantido para compatibilidade, mas sem uso prático nas abas)
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
+import math
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -511,7 +512,7 @@ with tab1:
         
         df_temp = st.session_state['df_original'].copy()
         
-        # --- ORDENAÇÃO NUMÉRICA CORRETA (Corrigido na V20) ---
+        # --- ORDENAÇÃO NUMÉRICA CORRETA ---
         # 1. Cria uma coluna auxiliar numérica, removendo '*' se houver
         df_temp['Order_Num'] = df_temp[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
         df_temp['Order_Num'] = pd.to_numeric(df_temp['Order_Num'], errors='coerce')
@@ -519,7 +520,7 @@ with tab1:
         # 2. Obtém as ordens únicas e as ordena numericamente
         df_ordens_unicas = df_temp.drop_duplicates(subset=[COLUNA_SEQUENCE]).sort_values(by='Order_Num')
         ordens_originais_sorted = df_ordens_unicas[COLUNA_SEQUENCE].astype(str).tolist()
-        # --- FIM NOVO ---
+        # --- FIM ORDENAÇÃO ---
         
         def update_volumoso_ids(order_id, is_checked):
             if is_checked:
@@ -530,21 +531,40 @@ with tab1:
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
-        # Container para os checkboxes
+        # --- CORREÇÃO DE LAYOUT: EXIBIÇÃO LINHA POR LINHA ---
+        NUM_COLS = 5
+        total_items = len(ordens_originais_sorted)
+        # Calcula o número de itens por coluna (arredondado para cima)
+        items_per_col = math.ceil(total_items / NUM_COLS)
+
         with st.container(height=300):
-            cols = st.columns(5)
-            col_index = 0
-            for order_id in ordens_originais_sorted:
-                with cols[col_index % 5]:
-                    is_checked = order_id in st.session_state['volumoso_ids']
-                    st.checkbox(
-                        str(order_id), 
-                        value=is_checked, 
-                        key=f"vol_{order_id}",
-                        on_change=update_volumoso_ids, 
-                        args=(order_id, not is_checked) 
-                    )
-                col_index += 1
+            cols = st.columns(NUM_COLS)
+            
+            # Itera sobre o número de "linhas"
+            for row in range(items_per_col):
+                # Itera sobre cada coluna naquela "linha"
+                for col_index in range(NUM_COLS):
+                    
+                    # Calcula o índice na lista ordenada
+                    # Ordem: 0, 5, 10... (col 1), 1, 6, 11... (col 2)
+                    # Onde a gente estava errando era aqui.
+                    
+                    # CORREÇÃO: Queremos 1, 2, 3, 4, 5 (Primeira Linha)
+                    # Índice correto para preenchimento por LINHA:
+                    item_index = row * NUM_COLS + col_index 
+                    
+                    if item_index < total_items:
+                        order_id = ordens_originais_sorted[item_index]
+                        with cols[col_index]:
+                            is_checked = order_id in st.session_state['volumoso_ids']
+                            st.checkbox(
+                                str(order_id), 
+                                value=is_checked, 
+                                key=f"vol_{order_id}",
+                                on_change=update_volumoso_ids, 
+                                args=(order_id, not is_checked) 
+                            )
+        # --- FIM CORREÇÃO DE LAYOUT ---
 
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")

@@ -2,55 +2,55 @@ import streamlit as st
 import pandas as pd
 import json
 import uuid
-from firebase_admin import credentials, initialize_app, firestore
+from firebase_admin import credentials, initialize_app, firestore, get_app
 from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
-import os # Importação adicionada para usar variáveis de ambiente
+import os 
 
 # --- Configurações Iniciais ---
 st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção Manual")
 
-# Variáveis globais simuladas (IMPORTANTE: No ambiente real, use as variáveis __ fornecidas)
-APP_ID = "rota_flow_simulacao" # ID fixo para o app de roteirização
-# Configuração MOCK simplificada. No Canvas real, o SDK de Admin não é usado diretamente
-# O Firebase Config para inicialização básica do SDK Web (Client SDK) é o que seria usado no browser.
+# Variáveis globais simuladas
+APP_ID = "rota_flow_simulacao" 
+
 MOCK_FIREBASE_CONFIG = {
     "apiKey": "mock-api-key",
     "authDomain": "mock-project-id.firebaseapp.com",
-    "projectId": "mock-project-id", # Chave essencial
+    "projectId": "mock-project-id", 
     "storageBucket": "mock-project-id.appspot.com",
     "messagingSenderId": "mock-sender-id",
     "appId": "mock-app-id"
 }
 
-# Use variáveis globais ou mocks
 app_id = APP_ID
 
 # --- 1. Inicialização do Firebase e Firestore ---
 @st.cache_resource
 def initialize_firestore():
     """
-    Inicializa o Firebase e o cliente Firestore.
-    
-    Adicionado 'project=...' na chamada a firestore.client() para resolver o erro de Project ID.
+    Inicializa o Firebase e o cliente Firestore, garantindo que initialize_app()
+    não seja chamado mais de uma vez.
     """
     if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
         return st.session_state['db']
     
     try:
-        if not initialize_app():
-            # Cria uma credencial básica que será aceita pelo initialize_app
+        # Tenta obter o aplicativo padrão (default app) se ele já existir.
+        # Isso impede o erro "The default Firebase app already exists".
+        try:
+            get_app()
+        except ValueError:
+            # Se não existir (ValueError), inicializa
             cred = credentials.Certificate(MOCK_FIREBASE_CONFIG)
             initialize_app(cred)
 
-        # CORREÇÃO CRÍTICA: Passa o projectId explicitamente
+        # Passa o projectId explicitamente para o cliente Firestore
         db = firestore.client(project=MOCK_FIREBASE_CONFIG['projectId'])
         st.session_state['db'] = db
         return db
         
     except Exception as e:
-        # Se falhar, exibe uma mensagem genérica sem vazar detalhes da chave
-        st.error(f"Erro ao inicializar o Firestore: {e}. Verifique se a variável MOCK_FIREBASE_CONFIG está correta para este ambiente.")
+        st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
         return None
 
 db: BaseClient = initialize_firestore()
@@ -65,7 +65,6 @@ def get_fixed_coords(db: BaseClient, app_id: str):
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
         doc = doc_ref.get()
         if doc.exists:
-            # O dicionário é armazenado como um campo dentro do documento
             data = doc.to_dict()
             return data.get('fixed_coords', {})
         return {}
@@ -80,7 +79,6 @@ def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
     try:
         # Caminho onde o dicionário é salvo
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
-        # Salva o dicionário completo em um único campo 'fixed_coords'
         doc_ref.set({'fixed_coords': fixed_coords_dict})
         return True
     except Exception as e:
@@ -95,7 +93,6 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     st.header("1. Detalhes do Processamento")
 
     # 1. Validação de Colunas Mínimas
-    # REQUIRED_COL deve ser as colunas que você PRECISA para o processamento de correção e geolocalização.
     required_cols = ['Destination Address', 'Latitude', 'Longitude']
     if not all(col in df.columns for col in required_cols):
         st.error(f"O arquivo deve conter as colunas: {required_cols}.")
@@ -109,12 +106,11 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     st.subheader("APLICAÇÃO DE CORREÇÕES MANUAIS (Ponto Crítico)")
     st.warning("A correspondência é feita usando a coluna **'Destination Address'** como chave EXATA (caracter por caracter).")
 
-    # --- LÓGICA DE CORREÇÃO ATUALIZADA ---
+    # --- LÓGICA DE CORREÇÃO ---
     
     # 1. Mapeamento
     # O PANDAS procura o valor da coluna 'Destination Address' como chave em fixed_coords_dict.
     df[['Fixed_Lat', 'Fixed_Lng']] = df['Destination Address'].map(fixed_coords_dict).apply(
-        # Aplica uma função para extrair 'lat' e 'lng' se o mapeamento for bem-sucedido (for um dicionário)
         lambda x: pd.Series(x) if isinstance(x, dict) else pd.Series([None, None])
     )
     
@@ -217,7 +213,6 @@ def main():
             submitted = st.form_submit_button("Adicionar Correção e Salvar")
 
             if submitted:
-                # --- NOVO BLOCO DE LIMPEZA E VALIDAÇÃO ---
                 if not new_address:
                     st.warning("Preencha o Endereço para adicionar a correção.")
 
@@ -242,7 +237,6 @@ def main():
                 except ValueError:
                     # 4. Falha: Exibe a mensagem de erro
                     st.error("Latitude e Longitude devem ser números válidos. Verifique se usou ponto (.) ou se há caracteres estranhos.")
-                # --- FIM DO NOVO BLOCO ---
 
         # 2.2 Visualizar/Excluir Dicionário
         st.subheader("2.2 Visualizar Dicionário Atual")

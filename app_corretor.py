@@ -5,6 +5,7 @@ from rapidfuzz import process, fuzz
 import io
 import streamlit as st
 import sqlite3 
+# Importação de st_aggrid
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
 # --- Configurações Iniciais da Página ---
@@ -62,7 +63,8 @@ def get_db_connection():
     """
     Cria e retorna a conexão com o banco de dados SQLite.
     """
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    # Adicionando um timeout para aumentar a resiliência da conexão
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
     return conn
 
 def create_table_if_not_exists(conn):
@@ -494,7 +496,7 @@ with tab1:
                 
                 st.metric(
                     label="Endereços Únicos Agrupados",
-                  value=total_agrupados,
+                    value=total_agrupados,
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
                 
@@ -503,5 +505,51 @@ with tab1:
                     df_circuit['Order ID'].astype(str).str.contains(r'\*', regex=True)
                 ].copy()
                 
-                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO)
- 
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                st.subheader("Arquivo para Roteirização (Circuit)")
+                st.dataframe(df_circuit, use_container_width=True)
+                
+                # Download Circuit 
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
+                    if not df_volumosos_separado.empty:
+                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
+                    else:
+                        st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
+                        
+                buffer_circuit.seek(0)
+                
+                st.download_button(
+                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    data=buffer_circuit,
+                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_circuit"
+                )
+
+
+# ----------------------------------------------------------------------------------
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# ----------------------------------------------------------------------------------
+
+with tab2:
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+
+    st.markdown("---")
+    st.subheader("2.1 Carregar Arquivo da Rota")
+
+    uploaded_file_pos = st.file_uploader(
+        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="file_pos"
+    )
+
+    sheet_name_default = "Table 3" 
+    sheet_name = sheet_name_default
+    
+    df_final_geral = None 
+    df_volumosos_impressao = None 
+    df_nao_volumosos_impressao = None

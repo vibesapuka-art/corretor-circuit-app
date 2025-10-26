@@ -5,7 +5,6 @@ import uuid
 import os 
 
 # Importação direta do cliente Google Cloud Firestore
-# Nota: Não estamos usando firebase_admin para maior estabilidade neste ambiente.
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
@@ -30,21 +29,21 @@ def initialize_firestore():
     Inicializa o cliente Firestore, definindo a variável de ambiente GOOGLE_CLOUD_PROJECT 
     para forçar o reconhecimento do Project ID.
     """
-    if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
-        return st.session_state['db']
+    # Se já estiver no estado da sessão (cache), retorna.
+    if 'db_client' in st.session_state and isinstance(st.session_state['db_client'], BaseClient):
+        return st.session_state['db_client']
     
     try:
-        # CORREÇÃO CRÍTICA: Define a variável de ambiente GOOGLE_CLOUD_PROJECT
+        # Define a variável de ambiente GOOGLE_CLOUD_PROJECT
         os.environ['GOOGLE_CLOUD_PROJECT'] = MOCK_FIREBASE_CONFIG['projectId']
         
         # Inicializa o cliente Firestore
         db = firestore.Client()
-        st.session_state['db'] = db
+        st.session_state['db_client'] = db # Armazena no estado da sessão
         return db
         
     except Exception as e:
-        # Em um ambiente que não fornece credenciais, isso pode falhar.
-        # Retornamos None para que o aplicativo possa exibir uma mensagem de erro controlada.
+        # Retorna None em caso de falha de inicialização
         st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
         return None
 
@@ -52,7 +51,6 @@ def initialize_firestore():
 def get_fixed_coords(db: BaseClient, app_id: str):
     """Carrega o dicionário de Lat/Lng fixas do Firestore."""
     if not db:
-        # Se o DB não está pronto, retorna um dicionário vazio
         return {} 
     try:
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
@@ -62,12 +60,14 @@ def get_fixed_coords(db: BaseClient, app_id: str):
             return data.get('fixed_coords', {})
         return {}
     except Exception as e:
-        st.error(f"Erro ao carregar o dicionário fixo (Banco de Dados Indisponível): {e}. Usando dicionário vazio.")
+        # AQUI garantimos que, se falhar, o app não trave.
+        st.error(f"⚠️ Erro ao tentar carregar o dicionário fixo do Banco de Dados: {e}. Usando dicionário vazio local.")
         return {}
 
 def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
     """Salva o dicionário de Lat/Lng fixas no Firestore."""
     if not db:
+        st.error("Falha ao salvar. Conexão com o Firestore indisponível.")
         return False
     try:
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
@@ -101,13 +101,11 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     # --- LÓGICA DE CORREÇÃO ---
     
     # 1. Mapeamento
-    # O PANDAS procura o valor da coluna 'Destination Address' como chave em fixed_coords_dict.
     df[['Fixed_Lat', 'Fixed_Lng']] = df['Destination Address'].map(fixed_coords_dict).apply(
         lambda x: pd.Series(x) if isinstance(x, dict) else pd.Series([None, None])
     )
     
     # 2. Priorizar a correção manual sobre os valores existentes
-    # .combine_first() usa o valor da primeira série (Fixed) se não for nulo, caso contrário, usa o valor da segunda (Original).
     df['Latitude'] = df['Fixed_Lat'].combine_first(df['Latitude'])
     df['Longitude'] = df['Fixed_Lng'].combine_first(df['Longitude'])
     
@@ -125,18 +123,14 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
         st.info("Estes endereços precisam ser corrigidos manualmente na Aba 2 para serem roteirizados.")
     
     # 4. Preparar o DataFrame para Download/Próxima Etapa
-    
-    # Remover colunas temporárias
     df = df.drop(columns=['Fixed_Lat', 'Fixed_Lng'])
     
-    # Adicionar coluna de ID de Roteirização (se não existir)
     if 'Routing_ID' not in df.columns:
         df['Routing_ID'] = [str(uuid.uuid4()) for _ in range(len(df))]
 
     st.subheader("Saída Final")
     st.dataframe(df.head())
     
-    # Botão de Download
     csv = df.to_csv(index=False)
     st.download_button(
         label="Download Dados Processados (CSV)",
@@ -159,7 +153,13 @@ def main():
 
     # 2. Se o DB estiver pronto, carrega o dicionário para o estado da sessão (se ainda não estiver lá)
     if 'fixed_coords' not in st.session_state:
+        # Tentativa de carregar o dicionário. Se falhar, apenas usa um dicionário vazio.
         st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
+
+    # --- Ponto de Verificação CRÍTICO ---
+    # Se você vir esta mensagem, o app está carregando 100% da interface.
+    # Caso contrário, o crash é na linha acima.
+    st.info(f"Conexão OK. Dicionário carregado com {len(st.session_state['fixed_coords'])} correções.")
 
     tab1, tab2 = st.tabs(["1. Processar Planilha (Correção)", "2. Gerenciar Dicionário Fixo"])
 
@@ -175,7 +175,6 @@ def main():
 
         if uploaded_file:
             try:
-                # Determinar o tipo de arquivo
                 if uploaded_file.name.endswith('.csv'):
                     data = uploaded_file.getvalue().decode('utf-8')
                     df = pd.read_csv(StringIO(data))
@@ -184,7 +183,6 @@ def main():
                 
                 st.success(f"Arquivo '{uploaded_file.name}' lido com sucesso. Total de {len(df)} linhas.")
 
-                # Executa o processamento
                 process_data(df.copy(), st.session_state['fixed_coords'])
                 
             except Exception as e:
@@ -194,7 +192,6 @@ def main():
     with tab2:
         st.header("2. Gerenciar Dicionário Fixo de Lat/Lng")
         
-        # 2.1 Adicionar/Atualizar Correção
         st.subheader("2.1 Adicionar Nova Correção")
         st.info("Use o conteúdo **EXATO** da coluna 'Destination Address' como chave para garantir a correspondência.")
         with st.form("form_add_correction"):
@@ -208,25 +205,20 @@ def main():
                     st.warning("Preencha o Endereço para adicionar a correção.")
 
                 try:
-                    # 1. Limpeza: Remove espaços e substitui vírgula por ponto (para flexibilidade)
                     cleaned_lat = new_lat.strip().replace(',', '.')
                     cleaned_lng = new_lng.strip().replace(',', '.')
 
-                    # 2. Conversão: Tenta converter para float
                     lat_val = float(cleaned_lat)
                     lng_val = float(cleaned_lng)
                     
-                    # 3. Sucesso: Adiciona/Atualiza o dicionário
                     st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
                     
-                    # Salva no Firestore
                     if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
                         st.success(f"Correção salva com sucesso para: '{new_address}'")
                     else:
-                        st.error("Falha ao salvar a correção no banco de dados. (Verifique o log de erro acima)")
+                        st.error("Falha ao salvar a correção no banco de dados.")
 
                 except ValueError:
-                    # 4. Falha: Exibe a mensagem de erro
                     st.error("Latitude e Longitude devem ser números válidos. Verifique se usou ponto (.) ou se há caracteres estranhos.")
 
         # 2.2 Visualizar/Excluir Dicionário
@@ -234,7 +226,6 @@ def main():
         
         fixed_coords = st.session_state['fixed_coords']
         if fixed_coords:
-            # Converte para DataFrame para visualização fácil
             data_list = []
             for address, coords in fixed_coords.items():
                 data_list.append({
@@ -246,7 +237,6 @@ def main():
             df_fixed = pd.DataFrame(data_list)
             st.dataframe(df_fixed, use_container_width=True, height=300)
 
-            # Opção de Excluir
             address_to_delete = st.selectbox(
                 "Selecione o endereço para remover (opcional):",
                 [""] + list(fixed_coords.keys())

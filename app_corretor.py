@@ -184,7 +184,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df['Bairro'] = df['Bairro'].astype(str).replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
-    df['Original_Address_For_Cache'] = df[COLUNA_ENDERECO].astype(str) # Mantém a string original
+    # CHAVE DE CACHE: Mantém a string ORIGINAL para o lookup
+    df['Original_Address_For_Cache'] = df[COLUNA_ENDERECO].astype(str) 
 
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
@@ -246,7 +247,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
             
-            # Colchetes de COLUNA_ENDERECO verificados e corrigidos
             endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
             
             if not endereco_oficial_original:
@@ -267,7 +267,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
-        # Lista de todos os Endereços Originais do Cliente que foram agrupados
+        # ESSENCIAL: Lista de todos os Endereços Originais do Cliente que foram agrupados
         Enderecos_Originais=(COLUNA_ENDERECO, lambda x: ', '.join(x.astype(str).unique())),
         
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
@@ -300,7 +300,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
 
-    # Chave '}' e colchetes verificados
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
@@ -310,6 +309,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     }) 
     
     # Retorna o DF do Circuit E o DF Agrupado para revisão de Geoloc
+    # df_agrupado_para_edicao usará Enderecos_Originais como chave para o cache
     return df_circuit, df_agrupado[['Enderecos_Originais', 'Latitude', 'Longitude']].copy()
 
 
@@ -398,6 +398,7 @@ with tab1:
 
     if uploaded_file_pre is not None:
         try:
+            # Detecta o tipo de arquivo e carrega
             if uploaded_file_pre.name.endswith('.csv'):
                 df_input_pre = pd.read_csv(uploaded_file_pre)
             else:
@@ -550,15 +551,16 @@ with tab1:
     if st.session_state['df_agrupado_para_edicao'] is not None and not st.session_state['df_agrupado_para_edicao'].empty:
         
         df_edicao = st.session_state['df_agrupado_para_edicao'].copy()
-        # Não temos mais a coluna 'Endereço Agrupado' aqui, usamos Endereços Originais como proxy para o agrupamento
+        # Colunas claras para o usuário
         df_edicao.columns = ['Endereços Originais do Cliente', 'Latitude', 'Longitude']
 
-        st.caption("Edite as colunas **Latitude** e **Longitude** manualmente. A correção será aplicada a todos os 'Endereços Originais do Cliente' listados e salva no cache para uso futuro.")
+        st.caption("Edite as colunas **Latitude** e **Longitude** manualmente. A correção será aplicada a **todos os Endereços Originais** listados na primeira coluna e salva no cache para uso futuro.")
         st.warning("⚠️ **Atenção:** As coordenadas salvas substituirão as antigas para os endereços originais listados.")
 
         # --- Configuração AgGrid ---
         gb = GridOptionsBuilder.from_dataframe(df_edicao)
-        gb.configure_column('Endereços Originais do Cliente', editable=False, wrapText=True, autoHeight=True)
+        # Primeira coluna não é editável, mas seu conteúdo é a chave para o cache
+        gb.configure_column('Endereços Originais do Cliente', editable=False, wrapText=True, autoHeight=True) 
         gb.configure_columns(['Latitude', 'Longitude'], type=["numericColumn", "customNumericFormat"], precision=6, editable=True)
         gb.configure_grid_options(domLayout='normal', enableCellTextSelection=True, rowHeight=60)
         gridOptions = gb.build()

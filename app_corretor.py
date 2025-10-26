@@ -4,9 +4,8 @@ import re
 from rapidfuzz import process, fuzz
 import io
 import streamlit as st
-import sqlite3 # Importação padrão do SQLite
-# IMPORT AGGRID para permitir a edição da geolocalização
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+import sqlite3 
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -18,31 +17,25 @@ st.set_page_config(
 # --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
 st.markdown("""
 <style>
-/* Alinha o texto de entrada na caixa de texto (útil para formulários) */
 .stTextArea [data-baseweb="base-input"] {
     text-align: left;
     font-family: monospace;
 }
-/* *** CSS FORTE: Garante que o conteúdo e o título do st.text_area sejam alinhados à esquerda *** */
 div.stTextArea > label {
-    text-align: left !important; /* Título do text area */
+    text-align: left !important; 
 }
-/* Força o alinhamento à esquerda no campo de texto principal */
 div[data-testid="stTextarea"] textarea {
-    text-align: left !important; /* Conteúdo do text area */
+    text-align: left !important; 
     font-family: monospace;
-    white-space: pre-wrap; /* Garante quebras de linha corretas */
+    white-space: pre-wrap;
 }
-/* Alinha os títulos e outros elementos em geral */
 h1, h2, h3, h4, .stMarkdown {
     text-align: left !important;
 }
-/* Força a quebra de linha em cabeçalhos de tabela do AgGrid */
 .ag-header-cell-text {
     white-space: normal !important;
     line-height: 1.2 !important;
 }
-
 </style>
 """, unsafe_allow_html=True)
 # --------------------------------------------------------------------------------------
@@ -67,10 +60,8 @@ CACHE_COLUMNS = ['Endereco_Original_Cliente', 'Latitude_Corrigida', 'Longitude_C
 @st.cache_resource
 def get_db_connection():
     """
-    Cria e retorna a conexão com o banco de dados SQLite usando sqlite3.connect.
-    CORREÇÃO: Usando sqlite3 nativo para evitar o erro de st.experimental_connection.
+    Cria e retorna a conexão com o banco de dados SQLite.
     """
-    # check_same_thread=False é necessário para rodar no Streamlit
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     return conn
 
@@ -84,42 +75,38 @@ def create_table_if_not_exists(conn):
     );
     """
     try:
-        # Usa o método execute() da conexão sqlite3
         conn.execute(query)
         conn.commit()
     except Exception as e:
-         # Captura e exibe qualquer erro de execução do SQL
         st.error(f"Erro ao criar tabela: {e}")
 
 
+@st.cache_data
 def load_geoloc_cache(conn):
     """Carrega todo o cache de geolocalização para um DataFrame."""
     try:
-        # Usa pd.read_sql_query com a conexão sqlite3
         df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
-        # Garante que as colunas de geoloc sejam numéricas
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
     except pd.io.sql.DatabaseError:
-        # Se a tabela não existir ainda ou der erro de DB, retorna um DataFrame vazio
-        st.info("Cache de geolocalização não encontrado ou vazio. Será criado após a primeira correção.")
         return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
         st.error(f"Erro ao carregar cache de geolocalização: {e}")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
-def save_corrections_to_db(conn, df_correcoes):
-    """Salva um DataFrame de correções no banco de dados, usando UPSERT."""
-    # A coluna de endereço deve ser a chave primária
-    df_correcoes = df_correcoes[CACHE_COLUMNS].copy()
+def save_raw_cache_to_db(conn, df_edited_cache):
+    """Salva um DataFrame de cache editado diretamente no banco de dados (UPSERT)."""
+    df_save = df_edited_cache.copy()
     
-    # Remover NaNs da Latitude/Longitude para evitar erros de tipo no DB
-    df_correcoes = df_correcoes.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
+    # Validação e limpeza
+    df_save = df_save.dropna(subset=['Endereco_Original_Cliente'])
+    df_save['Latitude_Corrigida'] = pd.to_numeric(df_save['Latitude_Corrigida'], errors='coerce')
+    df_save['Longitude_Corrigida'] = pd.to_numeric(df_save['Longitude_Corrigida'], errors='coerce')
+    df_save = df_save.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
     
-    data_tuples = [tuple(row) for row in df_correcoes.values]
+    data_tuples = [tuple(row) for row in df_save[CACHE_COLUMNS].values]
     
-    # SQLite UPSERT (ON CONFLICT REPLACE)
     upsert_query = f"""
     INSERT OR REPLACE INTO {TABLE_NAME} 
     (Endereco_Original_Cliente, Latitude_Corrigida, Longitude_Corrigida) 
@@ -127,16 +114,17 @@ def save_corrections_to_db(conn, df_correcoes):
     """
     
     try:
-        # Usa executemany e commit padrão do sqlite3
         conn.executemany(upsert_query, data_tuples)
         conn.commit()
-        
         st.success(f"Cache de geolocalização atualizado! Foram salvos **{len(data_tuples)}** registros únicos.")
         
-        # Invalida o cache do Streamlit para o novo load
+        # Limpa o cache do Streamlit para forçar o recarregamento na próxima vez
         load_geoloc_cache.clear() 
+        # Rerun para atualizar a tabela na tela
+        st.rerun() 
     except Exception as e:
-        st.error(f"Erro ao salvar as correções no banco de dados: {e}")
+        st.error(f"Erro ao salvar o cache no banco de dados: {e}")
+
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
@@ -170,13 +158,13 @@ def get_most_common_or_empty(x):
 @st.cache_data
 def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc):
     """
-    Função principal que aplica a correção, o agrupamento e o lookup no cache.
+    Função principal que aplica a correção (usando cache 100% match) e o agrupamento.
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, 'Bairro', 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
             st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
-            return None, None 
+            return None 
 
     df = df_entrada.copy()
     
@@ -184,7 +172,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df['Bairro'] = df['Bairro'].astype(str).replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
-    # CHAVE DE CACHE: Mantém a string ORIGINAL para o lookup
+    # CHAVE DE CACHE: Mantém a string ORIGINAL para o lookup 100%
     df['Original_Address_For_Cache'] = df[COLUNA_ENDERECO].astype(str) 
 
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
@@ -192,45 +180,51 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 
     
     # =========================================================================
-    # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
+    # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO (100% MATCH)
     # =========================================================================
     
     if not df_cache_geoloc.empty:
-        # Merge do DataFrame principal com o cache
+        # Renomeia colunas do cache para evitar conflitos no merge
+        df_cache_lookup = df_cache_geoloc.rename(columns={
+            'Latitude_Corrigida': 'Cache_Lat',
+            'Longitude_Corrigida': 'Cache_Lon'
+        })
+        
+        # Merge do DataFrame principal com o cache (Left Join no Endereço Original)
         df = pd.merge(
             df, 
-            df_cache_geoloc, 
+            df_cache_lookup, 
             left_on='Original_Address_For_Cache', 
             right_on='Endereco_Original_Cliente', 
             how='left'
         )
         
-        # Atualiza Latitude e Longitude se a correção existir no cache
-        cache_mask = df['Latitude_Corrigida'].notna()
-        df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Latitude_Corrigida']
-        df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Longitude_Corrigida']
+        # Atualiza Latitude e Longitude SOMENTE se a correção existir no cache
+        cache_mask = df['Cache_Lat'].notna()
+        df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
+        df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         
-        st.info(f"Cache aplicado! {cache_mask.sum()} registros de geolocalização foram corrigidos automaticamente.")
+        st.info(f"Cache aplicado com 100% de match! **{cache_mask.sum()}** registros de geolocalização foram corrigidos automaticamente pelas suas edições no cache.")
 
         # Remove colunas auxiliares
-        df = df.drop(columns=['Endereco_Original_Cliente', 'Latitude_Corrigida', 'Longitude_Corrigida'], errors='ignore')
+        df = df.drop(columns=['Endereco_Original_Cliente', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
     # =========================================================================
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
+    # O agrupamento ainda é necessário para roteirização, mesmo que a geoloc esteja correta.
     # =========================================================================
     
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
     
-    # Fuzzy Matching
-    progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching...")
+    progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching e Agrupamento...")
     total_unicos = len(enderecos_unicos)
     
     if total_unicos == 0:
         progresso_bar.empty()
         st.warning("Nenhum endereço encontrado para processar.")
-        return None, None
+        return None
     
     for i, end_principal in enumerate(enderecos_unicos):
         if end_principal not in mapa_correcao:
@@ -267,12 +261,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
     
     df_agrupado = df.groupby(colunas_agrupamento).agg(
-        # ESSENCIAL: Lista de todos os Endereços Originais do Cliente que foram agrupados
-        Enderecos_Originais=(COLUNA_ENDERECO, lambda x: ', '.join(x.astype(str).unique())),
-        
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
-        # Mantém a geoloc (que pode ter sido corrigida pelo cache)
+        # A Latitude/Longitude aqui já é a corrigida pelo cache, se houve match 100%
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
         
@@ -308,11 +299,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Notes': notas_completas
     }) 
     
-    # Retorna o DF do Circuit E o DF Agrupado para revisão de Geoloc
-    # df_agrupado_para_edicao usará Enderecos_Originais como chave para o cache
-    return df_circuit, df_agrupado[['Enderecos_Originais', 'Latitude', 'Longitude']].copy()
+    # Retorna APENAS o DF do Circuit
+    return df_circuit
 
-
+# ... (Funções de Pós-Roteirização permanecem inalteradas)
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
 # ===============================================
@@ -364,10 +354,10 @@ def processar_rota_para_impressao(df_input):
 conn = get_db_connection()
 create_table_if_not_exists(conn)
 
-st.title("🗺️ Flow Completo Circuit (Pré e Pós-Roteirização)")
+st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
 # CRIAÇÃO DAS ABAS 
-tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)"])
+tab1, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
 
 
 # ----------------------------------------------------------------------------------
@@ -376,16 +366,13 @@ tab1, tab2 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Rote
 
 with tab1:
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica o **Cache de Geolocalização** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
     # Inicializa o estado
     if 'df_original' not in st.session_state:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
         st.session_state['volumoso_ids'] = set() 
-    if 'df_agrupado_para_edicao' not in st.session_state:
-        st.session_state['df_agrupado_para_edicao'] = None
-
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -398,7 +385,6 @@ with tab1:
 
     if uploaded_file_pre is not None:
         try:
-            # Detecta o tipo de arquivo e carrega
             if uploaded_file_pre.name.endswith('.csv'):
                 df_input_pre = pd.read_csv(uploaded_file_pre)
             else:
@@ -414,7 +400,6 @@ with tab1:
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
-                 st.session_state['df_agrupado_para_edicao'] = None
 
 
             st.session_state['df_original'] = df_input_pre.copy()
@@ -475,7 +460,7 @@ with tab1:
             step=1,
             help="Use 100% para garantir que endereços na mesma rua com números diferentes não sejam agrupados (recomendado)."
         )
-        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**.")
+        st.info(f"O limite de similaridade está em **{limite_similaridade_ajustado}%**. Isso afeta o agrupamento, mas a geolocalização exata virá do cache.")
         
         
         if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final"):
@@ -491,15 +476,14 @@ with tab1:
                     COLUNA_SEQUENCE
                 ] = str_id_volumoso + '*'
 
-            # 2. Carregar Cache de Geolocalização
+            # 2. Carregar Cache de Geolocalização (O @st.cache_data garante que ele pega o último salvo)
             df_cache = load_geoloc_cache(conn)
 
             # 3. Iniciar o processamento e agrupamento
-            with st.spinner('Processando dados, aplicando cache e agrupando...'):
-                 df_circuit, df_agrupado_edicao = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+            with st.spinner('Aplicando cache 100% match e processando dados...'):
+                 df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
             
             if df_circuit is not None:
-                st.session_state['df_agrupado_para_edicao'] = df_agrupado_edicao # Salva para edição posterior
                 
                 st.markdown("---")
                 st.header("✅ Resultado Concluído!")
@@ -541,85 +525,6 @@ with tab1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_excel_circuit"
                 )
-                
-    # =========================================================================
-    # 1.4 EDIÇÃO MANUAL E SALVAMENTO DE GEOLOCALIZAÇÃO
-    # =========================================================================
-    st.markdown("---")
-    st.header("1.4 Edição Manual da Geolocalização (Salvar no Cache)")
-
-    if st.session_state['df_agrupado_para_edicao'] is not None and not st.session_state['df_agrupado_para_edicao'].empty:
-        
-        df_edicao = st.session_state['df_agrupado_para_edicao'].copy()
-        # Colunas claras para o usuário
-        df_edicao.columns = ['Endereços Originais do Cliente', 'Latitude', 'Longitude']
-
-        st.caption("Edite as colunas **Latitude** e **Longitude** manualmente. A correção será aplicada a **todos os Endereços Originais** listados na primeira coluna e salva no cache para uso futuro.")
-        st.warning("⚠️ **Atenção:** As coordenadas salvas substituirão as antigas para os endereços originais listados.")
-
-        # --- Configuração AgGrid ---
-        gb = GridOptionsBuilder.from_dataframe(df_edicao)
-        # Primeira coluna não é editável, mas seu conteúdo é a chave para o cache
-        gb.configure_column('Endereços Originais do Cliente', editable=False, wrapText=True, autoHeight=True) 
-        gb.configure_columns(['Latitude', 'Longitude'], type=["numericColumn", "customNumericFormat"], precision=6, editable=True)
-        gb.configure_grid_options(domLayout='normal', enableCellTextSelection=True, rowHeight=60)
-        gridOptions = gb.build()
-        
-        # Exibir AgGrid
-        grid_response = AgGrid(
-            df_edicao,
-            gridOptions=gridOptions,
-            data_return_mode=DataReturnMode.AS_INPUT,
-            update_mode=GridUpdateMode.VALUE_CHANGED,
-            fit_columns_on_grid_load=False,
-            allow_unsafe_jscode=True, 
-            enable_enterprise_modules=False,
-            height=350,
-            width='100%',
-            reload_data=True,
-            key='geoloc_editor'
-        )
-        
-        df_edited = grid_response['data']
-
-        if st.button("💾 Salvar Correções de Geolocalização no Cache", key="btn_save_cache"):
-            
-            correcoes_dict = {}
-            for index, row in df_edited.iterrows():
-                # Lista de endereços originais do cliente separados por ', '
-                enderecos_originais = row['Endereços Originais do Cliente'].split(', ')
-                
-                # Garante que Latitude e Longitude são numéricas, se o usuário digitou texto
-                lat = pd.to_numeric(row['Latitude'], errors='coerce')
-                lon = pd.to_numeric(row['Longitude'], errors='coerce')
-                
-                if pd.isna(lat) or pd.isna(lon):
-                    st.error(f"Erro: Latitude ou Longitude inválida para o grupo de endereços: {row['Endereços Originais do Cliente']}. Não será salva.")
-                    continue
-                
-                # Aplica a mesma correção (lat/lon) a cada endereço original
-                for original_addr in enderecos_originais:
-                    correcoes_dict[original_addr.strip()] = (lat, lon)
-            
-            # Criar o DF para Inserção no Cache
-            df_final_cache = pd.DataFrame([
-                [addr, lat, lon] 
-                for addr, (lat, lon) in correcoes_dict.items()
-            ], columns=CACHE_COLUMNS)
-
-            save_corrections_to_db(conn, df_final_cache)
-            st.session_state['df_agrupado_para_edicao'] = None # Limpa a tela de edição
-
-    elif st.session_state['df_agrupado_para_edicao'] is not None and st.session_state['df_agrupado_para_edicao'].empty:
-         st.info("Nenhum dado para edição. Carregue e processe a planilha primeiro.")
-
-    # Limpa a sessão se o arquivo for removido
-    elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
-        st.session_state['df_original'] = None
-        st.session_state['volumoso_ids'] = set()
-        st.session_state['last_uploaded_name'] = None
-        st.session_state['df_agrupado_para_edicao'] = None
-        st.rerun() 
 
 
 # ----------------------------------------------------------------------------------
@@ -628,6 +533,7 @@ with tab1:
 
 with tab2:
     st.header("2. Limpar Saída do Circuit para Impressão")
+    # ... (Conteúdo da aba 2 permanece inalterado)
     st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
 
     st.markdown("---")
@@ -650,11 +556,11 @@ with tab2:
     copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
     copia_data_nao_volumosos = "Nenhum pacote não-volumoso encontrado na rota."
 
-    # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
     if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
         sheet_name = st.text_input(
             "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=sheet_name_default
+            value=sheet_name_default,
+            key="sheet_name_input"
         )
 
     if uploaded_file_pos is not None:
@@ -795,3 +701,60 @@ with tab2:
                 help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
                 key="download_list"
             )
+
+
+# ----------------------------------------------------------------------------------
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
+# ----------------------------------------------------------------------------------
+
+with tab3:
+    st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
+    st.info("Edite as coordenadas (Lat/Lon) ou adicione novas entradas. A coluna **'Endereco_Original_Cliente'** deve ser o texto exato que você espera encontrar nas planilhas. (É a chave de busca 100%.)")
+
+    # Carrega o cache (força o @st.cache_data a rodar se houve alteração no save)
+    df_cache_full = load_geoloc_cache(conn).fillna("")
+
+    if df_cache_full.empty:
+        # Cria um DataFrame vazio com as colunas corretas para permitir a adição manual
+        df_cache_full = pd.DataFrame(columns=CACHE_COLUMNS).fillna("")
+
+    st.caption(f"Cache atual: **{len(df_cache_full)}** registros.")
+    
+    # --- Configuração AgGrid para Edição do Cache ---
+    gb = GridOptionsBuilder.from_dataframe(df_cache_full)
+    
+    # Configura a coluna de endereço como a principal (não editável uma vez que a linha é salva, mas editável aqui)
+    gb.configure_column('Endereco_Original_Cliente', headerName="Endereço Original do Cliente (Chave de Busca)", editable=True, wrapText=True, autoHeight=True)
+    
+    # Configura Lat e Lon para edição numérica
+    gb.configure_columns(['Latitude_Corrigida', 'Longitude_Corrigida'], headerName="Coordenada Corrigida", type=["numericColumn", "customNumericFormat"], precision=6, editable=True)
+    
+    # Permite adicionar novas linhas
+    gb.configure_grid_options(domLayout='normal', enableCellTextSelection=True, rowHeight=60, enableRangeSelection=True)
+    gb.configure_grid_options(enableCellTextSelection=True, rowHeight=60, suppressPropertyNamesCheck=True)
+    gb.configure_grid_options(domLayout='normal', enableCellTextSelection=True, rowHeight=60)
+    
+    gridOptions = gb.build()
+    
+    # Exibir AgGrid
+    grid_response = AgGrid(
+        df_cache_full,
+        gridOptions=gridOptions,
+        data_return_mode=DataReturnMode.AS_INPUT,
+        update_mode=GridUpdateMode.VALUE_CHANGED,
+        fit_columns_on_grid_load=True,
+        allow_unsafe_jscode=True, 
+        enable_enterprise_modules=False,
+        height=400,
+        width='100%',
+        reload_data=True,
+        columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
+        key='raw_cache_editor'
+    )
+    
+    df_edited_cache = grid_response['data']
+
+    st.markdown("---")
+    if st.button("💾 Salvar Alterações de Geolocalização no Banco de Dados", key="btn_save_raw_cache"):
+        # Chamada para a função que salva o DataFrame editado diretamente no cache
+        save_raw_cache_to_db(conn, df_edited_cache)

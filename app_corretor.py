@@ -403,6 +403,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    
+    V25: Corrigido o filtro de Não-Volumosos para incluir agrupamentos mistos.
     """
     coluna_notes_lower = 'notes'
     
@@ -428,12 +430,21 @@ def processar_rota_para_impressao(df_input):
     # DataFrame FINAL GERAL
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
-    # FILTRAR VOLUMOSOS
-    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True)].copy()
+    # =========================================================================
+    # 1. FILTRAR VOLUMOSOS
+    # Critério: O agrupamento contém PELO MENOS UM item com '*'
+    # =========================================================================
+    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
-    # FILTRAR NÃO-VOLUMOSOS
-    df_nao_volumosos = df[~df['Ordem ID'].str.contains(r'\*', regex=True)].copy() 
+    # =========================================================================
+    # 2. FILTRAR NÃO-VOLUMOSOS
+    # Critério V25 (CORRIGIDO): O agrupamento contém PELO MENOS UM item SEM '*'
+    # Regex: '\d+(?!\*)' procura por um número (\d+) que NÃO é seguido imediatamente por um '*' ((?!\*))
+    # Ex: '12,13*,14*' casa com '12' (aparece no não-volumoso)
+    # Ex: '13*,14*' não casa com nada (não aparece no não-volumoso)
+    # =========================================================================
+    df_nao_volumosos = df[df['Ordem ID'].str.contains(r'\d+(?!\*)', regex=True, na=False)].copy() 
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
@@ -694,6 +705,7 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V25 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
@@ -713,7 +725,8 @@ with tab2:
                 st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
                 
                 if not df_nao_volumosos_impressao.empty:
-                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos nesta rota.")
+                    # Contagem agora reflete agrupamentos puros E agrupamentos mistos
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos (puros ou mistos) nesta rota.")
                     
                     df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
                     df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
@@ -722,14 +735,15 @@ with tab2:
                     copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Todos os pedidos nesta rota estão marcados como volumosos ou a lista está vazia.")
+                    st.info("Todos os pedidos nesta rota estão marcados como volumosos (ou a lista está vazia).")
                     
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")
                 st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
                 
                 if not df_volumosos_impressao.empty:
-                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
+                    # Contagem agora reflete agrupamentos puros E agrupamentos mistos
+                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos (puros ou mistos) nesta rota.")
                     
                     df_visualizacao_vol = df_volumosos_impressao.copy()
                     df_visualizacao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
@@ -738,7 +752,7 @@ with tab2:
                     copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
+                    st.info("Nenhum pedido volumoso detectado nesta rota.")
 
 
             else:
@@ -775,7 +789,7 @@ with tab2:
         # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
         if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
             st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
-            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (sem o '*').")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (puros ou agrupamentos mistos).")
             
             st.text_area(
                 'Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):', 
@@ -787,7 +801,7 @@ with tab2:
         # --- ÁREA DE CÓPIA VOLUMOSOS ---
         if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
             st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
-            st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos.")
+            st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos (puros ou agrupamentos mistos).")
             
             st.text_area(
                 'Conteúdo da Lista de Impressão VOLUMOSOS (Alinhado à Esquerda):', 

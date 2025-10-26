@@ -13,13 +13,21 @@ st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção
 # Variáveis globais simuladas
 APP_ID = "rota_flow_simulacao" 
 
+# Configuração MOCK com todos os campos necessários para a credencial de serviço
+# Esta estrutura de dicionário é essencial para a função credentials.Certificate
 MOCK_FIREBASE_CONFIG = {
-    "apiKey": "mock-api-key",
-    "authDomain": "mock-project-id.firebaseapp.com",
-    "projectId": "mock-project-id", 
-    "storageBucket": "mock-project-id.appspot.com",
-    "messagingSenderId": "mock-sender-id",
-    "appId": "mock-app-id"
+    "type": "service_account",
+    "project_id": "mock-project-id", # Usando project_id conforme esperado por credentials.Certificate
+    "private_key_id": "mock-private-key-id",
+    # A chave privada é uma string que precisa ter as quebras de linha corretas
+    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDhgM8Gg7nUu...\n-----END PRIVATE KEY-----\n", 
+    "client_email": "mock-service-account@mock-project-id.iam.gserviceaccount.com",
+    "client_id": "1234567890",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/mock-service-account%40mock-project-id.iam.gserviceaccount.com",
+    "universe_domain": "googleapis.com"
 }
 
 app_id = APP_ID
@@ -29,28 +37,29 @@ app_id = APP_ID
 def initialize_firestore():
     """
     Inicializa o Firebase e o cliente Firestore, garantindo que initialize_app()
-    não seja chamado mais de uma vez.
+    não seja chamado mais de uma vez e que o cliente Firestore seja inicializado corretamente.
     """
     if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
         return st.session_state['db']
     
     try:
         # Tenta obter o aplicativo padrão (default app) se ele já existir.
-        # Isso impede o erro "The default Firebase app already exists".
         try:
             get_app()
         except ValueError:
-            # Se não existir (ValueError), inicializa
+            # Se não existir (ValueError), inicializa com a credencial
             cred = credentials.Certificate(MOCK_FIREBASE_CONFIG)
             initialize_app(cred)
 
-        # Passa o projectId explicitamente para o cliente Firestore
-        db = firestore.client(project=MOCK_FIREBASE_CONFIG['projectId'])
+        # CORREÇÃO CRÍTICA: Chama firestore.client() sem argumentos.
+        # Ele deve inferir o projeto a partir da credencial fornecida em initialize_app().
+        db = firestore.client()
         st.session_state['db'] = db
         return db
         
     except Exception as e:
-        st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
+        # Mudando a mensagem para refletir a nova estrutura da credencial
+        st.error(f"Erro ao inicializar o Firestore: {e}. Verifique a estrutura da variável MOCK_FIREBASE_CONFIG.")
         return None
 
 db: BaseClient = initialize_firestore()
@@ -158,11 +167,14 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
 # --- 4. Interface do Streamlit ---
 
 if 'fixed_coords' not in st.session_state:
-    st.session_state['fixed_coords'] = get_fixed_coords(db, app_id)
+    db_instance = initialize_firestore()
+    st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
 
 def main():
     # Verifica se a inicialização do banco de dados foi bem-sucedida antes de continuar
-    if db is None:
+    # db é uma variável global, mas verificamos novamente a instância
+    db_instance = initialize_firestore() 
+    if db_instance is None:
         st.warning("O aplicativo não pode funcionar sem a conexão com o Firestore.")
         return
 
@@ -229,7 +241,7 @@ def main():
                     st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
                     
                     # Salva no Firestore
-                    if save_fixed_coords(db, app_id, st.session_state['fixed_coords']):
+                    if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
                         st.success(f"Correção salva com sucesso para: '{new_address}'")
                     else:
                         st.error("Falha ao salvar a correção no banco de dados.")
@@ -264,7 +276,7 @@ def main():
             if st.button("Remover Correção Selecionada"):
                 if address_to_delete and address_to_delete in fixed_coords:
                     del st.session_state['fixed_coords'][address_to_delete]
-                    if save_fixed_coords(db, app_id, st.session_state['fixed_coords']):
+                    if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
                         st.success(f"Correção para '{address_to_delete}' removida com sucesso. Recarregue a página para atualizar a visualização.")
                         st.rerun()
                     else:

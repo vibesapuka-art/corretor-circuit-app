@@ -2,10 +2,6 @@ pandas
 rapidfuzz
 streamlit
 openpyxl
-streamlit-aggridstreamlit
-pandas
-rapidfuzz
-openpyxl
-firebase-admin
-google-cloud-firestore
+streamlit-aggrid
+
 

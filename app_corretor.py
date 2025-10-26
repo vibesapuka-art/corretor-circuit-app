@@ -4,12 +4,11 @@ import re
 from rapidfuzz import process, fuzz
 import io
 import streamlit as st
-import sqlite3 
+import sqlite3 # Importação padrão do SQLite
 # IMPORT AGGRID para permitir a edição da geolocalização
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Configurações Iniciais da Página ---
-# Usando st.set_page_config
 st.set_page_config(
     page_title="Circuit Flow Completo",
     layout="wide",
@@ -68,14 +67,11 @@ CACHE_COLUMNS = ['Endereco_Original_Cliente', 'Latitude_Corrigida', 'Longitude_C
 @st.cache_resource
 def get_db_connection():
     """
-    Cria e retorna a conexão com o banco de dados SQLite.
-    CORRIGIDO: Usa st.experimental_connection com o driver sqlite3.
+    Cria e retorna a conexão com o banco de dados SQLite usando sqlite3.connect.
+    CORREÇÃO: Usando sqlite3 nativo para evitar o erro de st.experimental_connection.
     """
-    conn = st.experimental_connection(
-        DB_NAME, 
-        type="sql", 
-        driver="sqlite3" 
-    )
+    # check_same_thread=False é necessário para rodar no Streamlit
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     return conn
 
 def create_table_if_not_exists(conn):
@@ -88,7 +84,9 @@ def create_table_if_not_exists(conn):
     );
     """
     try:
+        # Usa o método execute() da conexão sqlite3
         conn.execute(query)
+        conn.commit()
     except Exception as e:
          # Captura e exibe qualquer erro de execução do SQL
         st.error(f"Erro ao criar tabela: {e}")
@@ -97,14 +95,18 @@ def create_table_if_not_exists(conn):
 def load_geoloc_cache(conn):
     """Carrega todo o cache de geolocalização para um DataFrame."""
     try:
-        df_cache = conn.query(f"SELECT * FROM {TABLE_NAME}")
+        # Usa pd.read_sql_query com a conexão sqlite3
+        df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
         # Garante que as colunas de geoloc sejam numéricas
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
-    except Exception as e:
-        # Se a tabela não existir ainda ou der erro, retorna um DataFrame vazio
+    except pd.io.sql.DatabaseError:
+        # Se a tabela não existir ainda ou der erro de DB, retorna um DataFrame vazio
         st.info("Cache de geolocalização não encontrado ou vazio. Será criado após a primeira correção.")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    except Exception as e:
+        st.error(f"Erro ao carregar cache de geolocalização: {e}")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
 def save_corrections_to_db(conn, df_correcoes):
@@ -125,10 +127,9 @@ def save_corrections_to_db(conn, df_correcoes):
     """
     
     try:
-        with conn.session as session:
-            for row_data in data_tuples:
-                session.execute(upsert_query, row_data)
-            session.commit()
+        # Usa executemany e commit padrão do sqlite3
+        conn.executemany(upsert_query, data_tuples)
+        conn.commit()
         
         st.success(f"Cache de geolocalização atualizado! Foram salvos **{len(data_tuples)}** registros únicos.")
         
@@ -245,7 +246,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
             
-            # CORRIGIDO: Certificando-se de que a linha não contém erros de colchetes abertos.
+            # Colchetes de COLUNA_ENDERECO verificados e corrigidos
             endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
             
             if not endereco_oficial_original:
@@ -299,7 +300,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
 
-    # CORREÇÃO: Chave '}' faltante e colchetes verificados.
+    # Chave '}' e colchetes verificados
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
@@ -494,4 +495,301 @@ with tab1:
 
             # 3. Iniciar o processamento e agrupamento
             with st.spinner('Processando dados, aplicando cache e agrupando...'):
-                 df_
+                 df_circuit, df_agrupado_edicao = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+            
+            if df_circuit is not None:
+                st.session_state['df_agrupado_para_edicao'] = df_agrupado_edicao # Salva para edição posterior
+                
+                st.markdown("---")
+                st.header("✅ Resultado Concluído!")
+                
+                total_entradas = len(st.session_state['df_original'])
+                total_agrupados = len(df_circuit)
+                
+                st.metric(
+                    label="Endereços Únicos Agrupados",
+                    value=total_agrupados,
+                    delta=f"-{total_entradas - total_agrupados} agrupados"
+                )
+                
+                # 1. FILTRAR DADOS PARA A NOVA ABA "APENAS_VOLUMOSOS"
+                df_volumosos_separado = df_circuit[
+                    df_circuit['Order ID'].astype(str).str.contains(r'\*', regex=True)
+                ].copy()
+                
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
+                st.subheader("Arquivo para Roteirização (Circuit)")
+                st.dataframe(df_circuit, use_container_width=True)
+                
+                # Download Circuit 
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
+                    if not df_volumosos_separado.empty:
+                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
+                    else:
+                        st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
+                        
+                buffer_circuit.seek(0)
+                
+                st.download_button(
+                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    data=buffer_circuit,
+                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_excel_circuit"
+                )
+                
+    # =========================================================================
+    # 1.4 EDIÇÃO MANUAL E SALVAMENTO DE GEOLOCALIZAÇÃO
+    # =========================================================================
+    st.markdown("---")
+    st.header("1.4 Edição Manual da Geolocalização (Salvar no Cache)")
+
+    if st.session_state['df_agrupado_para_edicao'] is not None and not st.session_state['df_agrupado_para_edicao'].empty:
+        
+        df_edicao = st.session_state['df_agrupado_para_edicao'].copy()
+        # Não temos mais a coluna 'Endereço Agrupado' aqui, usamos Endereços Originais como proxy para o agrupamento
+        df_edicao.columns = ['Endereços Originais do Cliente', 'Latitude', 'Longitude']
+
+        st.caption("Edite as colunas **Latitude** e **Longitude** manualmente. A correção será aplicada a todos os 'Endereços Originais do Cliente' listados e salva no cache para uso futuro.")
+        st.warning("⚠️ **Atenção:** As coordenadas salvas substituirão as antigas para os endereços originais listados.")
+
+        # --- Configuração AgGrid ---
+        gb = GridOptionsBuilder.from_dataframe(df_edicao)
+        gb.configure_column('Endereços Originais do Cliente', editable=False, wrapText=True, autoHeight=True)
+        gb.configure_columns(['Latitude', 'Longitude'], type=["numericColumn", "customNumericFormat"], precision=6, editable=True)
+        gb.configure_grid_options(domLayout='normal', enableCellTextSelection=True, rowHeight=60)
+        gridOptions = gb.build()
+        
+        # Exibir AgGrid
+        grid_response = AgGrid(
+            df_edicao,
+            gridOptions=gridOptions,
+            data_return_mode=DataReturnMode.AS_INPUT,
+            update_mode=GridUpdateMode.VALUE_CHANGED,
+            fit_columns_on_grid_load=False,
+            allow_unsafe_jscode=True, 
+            enable_enterprise_modules=False,
+            height=350,
+            width='100%',
+            reload_data=True,
+            key='geoloc_editor'
+        )
+        
+        df_edited = grid_response['data']
+
+        if st.button("💾 Salvar Correções de Geolocalização no Cache", key="btn_save_cache"):
+            
+            correcoes_dict = {}
+            for index, row in df_edited.iterrows():
+                # Lista de endereços originais do cliente separados por ', '
+                enderecos_originais = row['Endereços Originais do Cliente'].split(', ')
+                
+                # Garante que Latitude e Longitude são numéricas, se o usuário digitou texto
+                lat = pd.to_numeric(row['Latitude'], errors='coerce')
+                lon = pd.to_numeric(row['Longitude'], errors='coerce')
+                
+                if pd.isna(lat) or pd.isna(lon):
+                    st.error(f"Erro: Latitude ou Longitude inválida para o grupo de endereços: {row['Endereços Originais do Cliente']}. Não será salva.")
+                    continue
+                
+                # Aplica a mesma correção (lat/lon) a cada endereço original
+                for original_addr in enderecos_originais:
+                    correcoes_dict[original_addr.strip()] = (lat, lon)
+            
+            # Criar o DF para Inserção no Cache
+            df_final_cache = pd.DataFrame([
+                [addr, lat, lon] 
+                for addr, (lat, lon) in correcoes_dict.items()
+            ], columns=CACHE_COLUMNS)
+
+            save_corrections_to_db(conn, df_final_cache)
+            st.session_state['df_agrupado_para_edicao'] = None # Limpa a tela de edição
+
+    elif st.session_state['df_agrupado_para_edicao'] is not None and st.session_state['df_agrupado_para_edicao'].empty:
+         st.info("Nenhum dado para edição. Carregue e processe a planilha primeiro.")
+
+    # Limpa a sessão se o arquivo for removido
+    elif uploaded_file_pre is None and st.session_state.get('df_original') is not None:
+        st.session_state['df_original'] = None
+        st.session_state['volumoso_ids'] = set()
+        st.session_state['last_uploaded_name'] = None
+        st.session_state['df_agrupado_para_edicao'] = None
+        st.rerun() 
+
+
+# ----------------------------------------------------------------------------------
+# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# ----------------------------------------------------------------------------------
+
+with tab2:
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+
+    st.markdown("---")
+    st.subheader("2.1 Carregar Arquivo da Rota")
+
+    uploaded_file_pos = st.file_uploader(
+        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="file_pos"
+    )
+
+    sheet_name_default = "Table 3" 
+    sheet_name = sheet_name_default
+    
+    df_final_geral = None 
+    df_volumosos_impressao = None 
+    df_nao_volumosos_impressao = None
+    
+    copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+    copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
+    copia_data_nao_volumosos = "Nenhum pacote não-volumoso encontrado na rota."
+
+    # Campo para o usuário especificar o nome da aba, útil para arquivos .xlsx
+    if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
+        sheet_name = st.text_input(
+            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
+            value=sheet_name_default
+        )
+
+    if uploaded_file_pos is not None:
+        try:
+            if uploaded_file_pos.name.endswith('.csv'):
+                df_input_pos = pd.read_csv(uploaded_file_pos)
+            else:
+                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
+            
+            df_input_pos.columns = df_input_pos.columns.str.strip() 
+            df_input_pos.columns = df_input_pos.columns.str.lower()
+            
+
+            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
+            
+            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
+            
+            if df_final_geral is not None and not df_final_geral.empty:
+                st.markdown("---")
+                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
+                
+                df_visualizacao_geral = df_final_geral.copy()
+                df_visualizacao_geral.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                st.dataframe(df_visualizacao_geral, use_container_width=True)
+
+                copia_data_geral = '\n'.join(df_final_geral['Lista de Impressão'].astype(str).tolist())
+                
+                
+                # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
+                st.markdown("---")
+                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
+                
+                if not df_nao_volumosos_impressao.empty:
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos nesta rota.")
+                    
+                    df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
+                    df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_nao_vol, use_container_width=True)
+                    
+                    copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Todos os pedidos nesta rota estão marcados como volumosos ou a lista está vazia.")
+                    
+                # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
+                st.markdown("---")
+                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
+                
+                if not df_volumosos_impressao.empty:
+                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
+                    
+                    df_visualizacao_vol = df_volumosos_impressao.copy()
+                    df_visualizacao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_vol, use_container_width=True)
+                    
+                    copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
+
+
+            else:
+                 copia_data_geral = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
+
+
+        except KeyError as ke:
+            if "Table 3" in str(ke) or "Sheet" in str(ke):
+                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
+            elif 'notes' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
+            elif 'address' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Address' (ou 'address') não foi encontrada. Verifique o arquivo de rota.")
+            else:
+                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
+            
+    
+    # Renderização das áreas de cópia e download
+    if uploaded_file_pos is not None:
+        
+        # --- ÁREA DE CÓPIA GERAL ---
+        st.markdown("### 2.3 Copiar para a Área de Transferência (Lista GERAL)")
+        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
+        
+        st.text_area(
+            "Conteúdo da Lista de Impressão GERAL (Alinhado à Esquerda):", 
+            copia_data_geral, 
+            height=300,
+            key="text_area_geral"
+        )
+
+        # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
+        if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (sem o '*').")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_nao_volumosos, 
+                height=150,
+                key="text_area_nao_volumosos"
+            )
+        
+        # --- ÁREA DE CÓPIA VOLUMOSOS ---
+        if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
+            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
+            st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos.")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_volumosos, 
+                height=150,
+                key="text_area_volumosos"
+            )
+        
+        
+        # --- BOTÕES DE DOWNLOAD ---
+        if df_final_geral is not None and not df_final_geral.empty:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
+                
+                if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
+                    df_nao_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Nao Volumosos')
+                    
+                if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
+                    df_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
+                    
+            buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Baixar Lista Limpa (Excel) - Geral + Separadas",
+                data=buffer,
+                file_name="Lista_Ordem_Impressao_FINAL.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
+                key="download_list"
+            )

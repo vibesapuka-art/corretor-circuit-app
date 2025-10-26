@@ -17,7 +17,7 @@ APP_ID = "rota_flow_simulacao" # ID fixo para o app de roteirização
 MOCK_FIREBASE_CONFIG = {
     "apiKey": "mock-api-key",
     "authDomain": "mock-project-id.firebaseapp.com",
-    "projectId": "mock-project-id",
+    "projectId": "mock-project-id", # Chave essencial
     "storageBucket": "mock-project-id.appspot.com",
     "messagingSenderId": "mock-sender-id",
     "appId": "mock-app-id"
@@ -30,28 +30,21 @@ app_id = APP_ID
 @st.cache_resource
 def initialize_firestore():
     """
-    Inicializa o Firebase usando credenciais de Admin (Service Account) ou simula
-    uma inicialização básica para fins de teste no Streamlit.
+    Inicializa o Firebase e o cliente Firestore.
     
-    Atenção: A inicialização baseada em Service Account (Admin SDK) só funciona se a chave
-    estiver *perfeitamente* formatada ou se estiver sendo lida de um arquivo de credenciais.
-    Para evitar o erro "InvalidData(InvalidByte(0, 46))", removemos o mock complexo.
+    Adicionado 'project=...' na chamada a firestore.client() para resolver o erro de Project ID.
     """
     if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
         return st.session_state['db']
     
     try:
-        # TENTA LER A CREDENCIAL DE SERVIÇO DE VARIÁVEL DE AMBIENTE OU ARQUIVO
-        # No seu ambiente Canvas, isso é tratado automaticamente. Aqui, fazemos um mock simplificado.
-        
-        # 1. Tenta inicializar com um mock de credencial básica (sem chave PEM complexa)
-        # Isso simula a inicialização no Streamlit, onde o acesso é geralmente mais restrito.
         if not initialize_app():
             # Cria uma credencial básica que será aceita pelo initialize_app
             cred = credentials.Certificate(MOCK_FIREBASE_CONFIG)
             initialize_app(cred)
 
-        db = firestore.client()
+        # CORREÇÃO CRÍTICA: Passa o projectId explicitamente
+        db = firestore.client(project=MOCK_FIREBASE_CONFIG['projectId'])
         st.session_state['db'] = db
         return db
         
@@ -227,7 +220,6 @@ def main():
                 # --- NOVO BLOCO DE LIMPEZA E VALIDAÇÃO ---
                 if not new_address:
                     st.warning("Preencha o Endereço para adicionar a correção.")
-                    # return # Não precisa de return aqui, a validação de baixo fará o trabalho.
 
                 try:
                     # 1. Limpeza: Remove espaços e substitui vírgula por ponto

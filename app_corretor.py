@@ -52,6 +52,9 @@ COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
 
+# --- Configurações de MIME Type (CORREÇÃO DE ERRO) ---
+EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 # --- Configurações de Banco de Dados ---
 DB_NAME = "geoloc_cache.sqlite"
 TABLE_NAME = "correcoes_geoloc_v3" 
@@ -508,7 +511,7 @@ with tab1:
         
         df_temp = st.session_state['df_original'].copy()
         
-        # --- NOVO: ORDENAÇÃO NUMÉRICA CORRETA ---
+        # --- ORDENAÇÃO NUMÉRICA CORRETA (Corrigido na V20) ---
         # 1. Cria uma coluna auxiliar numérica, removendo '*' se houver
         df_temp['Order_Num'] = df_temp[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
         df_temp['Order_Num'] = pd.to_numeric(df_temp['Order_Num'], errors='coerce')
@@ -619,7 +622,7 @@ with tab1:
                     label="📥 Baixar ARQUIVO PARA CIRCUIT",
                     data=buffer_circuit,
                     file_name="Circuit_Import_FINAL_MARCADO.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    mime=EXCEL_MIME_TYPE, # Usando a variável global
                     key="download_excel_circuit"
                 )
 
@@ -793,7 +796,7 @@ with tab2:
                 label="📥 Baixar Lista Limpa (Excel) - Geral + Separadas",
                 data=buffer,
                 file_name="Lista_Ordem_Impressao_FINAL.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime=EXCEL_MIME_TYPE, # Usando a variável global
                 help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
                 key="download_list"
             )
@@ -1001,4 +1004,25 @@ with tab3:
                 label="⬇️ Baixar Backup do Cache (.xlsx)",
                 data=backup_file,
                 file_name="cache_geolocalizacao_backup.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheet
+                mime=EXCEL_MIME_TYPE, # Usando a variável global
+                key="download_backup"
+            )
+        else:
+            st.warning("O cache está vazio, não há dados para baixar.")
+
+
+    # --- COLUNA DE RESTAURAÇÃO (UPLOAD) ---
+    with col_restauracao:
+        st.markdown("#### 📤 Restaurar Cache (Upload)")
+        st.warning("A restauração irá **substituir** entradas existentes (Endereço Completo) se a chave for igual.")
+        
+        uploaded_backup = st.file_uploader(
+            "Arraste o arquivo de Backup (.xlsx ou .csv) aqui:", 
+            type=['csv', 'xlsx'],
+            key="upload_backup"
+        )
+        
+        if uploaded_backup is not None:
+            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
+                with st.spinner('Restaurando dados do arquivo...'):
+                    import_cache_to_db(conn, uploaded_backup)

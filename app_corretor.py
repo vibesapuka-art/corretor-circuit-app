@@ -5,7 +5,7 @@ from rapidfuzz import process, fuzz
 import io
 import streamlit as st
 import sqlite3 
-# Importação de st_aggrid
+# Importação de st_aggrid (Não mais usado na Aba 3, mas mantido para compatibilidade)
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
 # --- Configurações Iniciais da Página ---
@@ -132,11 +132,15 @@ def save_single_entry_to_db(conn, endereco, lat, lon):
         st.error(f"Erro ao salvar a correção no banco de dados: {e}")
 
 
+# A função save_raw_cache_to_db não é mais usada, mas mantida para caso de reintrodução futura.
 def save_raw_cache_to_db(conn, df_edited_cache):
-    """Salva um DataFrame de cache editado diretamente no banco de dados (UPSERT em lote)."""
+    """
+    Salva um DataFrame de cache editado diretamente no banco de dados. 
+    Esta versão NÃO É MAIS USADA NA INTERFACE. Apenas entradas únicas são salvas agora.
+    """
     df_save = df_edited_cache.copy()
     
-    # Validação e limpeza
+    # 1. Validação e limpeza (mantém apenas as linhas completas)
     df_save = df_save.dropna(subset=['Endereco_Completo_Cache'])
     df_save['Latitude_Corrigida'] = pd.to_numeric(df_save['Latitude_Corrigida'], errors='coerce')
     df_save['Longitude_Corrigida'] = pd.to_numeric(df_save['Longitude_Corrigida'], errors='coerce')
@@ -145,17 +149,20 @@ def save_raw_cache_to_db(conn, df_edited_cache):
     
     data_tuples = [tuple(row) for row in df_save[CACHE_COLUMNS].values]
     
-    # Query de UPSERT com a nova estrutura
-    upsert_query = f"""
-    INSERT OR REPLACE INTO {TABLE_NAME} 
-    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-    VALUES (?, ?, ?);
-    """
-    
     try:
-        conn.executemany(upsert_query, data_tuples)
+        # 2. **DELETA TODO O CONTEÚDO** (Permite a sincronização completa do estado do AgGrid)
+        conn.execute(f"DELETE FROM {TABLE_NAME};") 
+        
+        # 3. Insere APENAS os registros válidos que estão na tabela AgGrid
+        insert_query = f"""
+        INSERT INTO {TABLE_NAME} 
+        (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
+        VALUES (?, ?, ?);
+        """
+        
+        conn.executemany(insert_query, data_tuples)
         conn.commit()
-        st.success(f"Cache de geolocalização atualizado! Foram salvos **{len(data_tuples)}** registros únicos.")
+        st.success(f"Cache de geolocalização SINCRONIZADO! Foram salvos **{len(data_tuples)}** registros únicos.")
         
         # Limpa o cache do Streamlit para forçar o recarregamento na próxima vez
         load_geoloc_cache.clear() 
@@ -810,70 +817,4 @@ with tab3:
     
     st.markdown("---")
     
-    # --- Edição em Lote (AgGrid) ---
-    st.subheader("3.3 Edição em Lote (Para Excluir ou Corrigir Várias Linhas)")
-    
-    # 2. Garante que o DataFrame tenha pelo menos uma linha vazia se estiver vazio
-    if df_cache_original.empty:
-        df_for_aggrid = pd.DataFrame([["", None, None]], columns=CACHE_COLUMNS)
-    else:
-        df_for_aggrid = df_cache_original.copy()
-    
-    # Uso a session state para manter o estado da adição de linhas (se houver)
-    if 'df_aggrid_data' not in st.session_state or len(st.session_state['df_aggrid_data'].columns) != len(CACHE_COLUMNS):
-        st.session_state['df_aggrid_data'] = df_for_aggrid.copy()
-
-    if st.button("➕ Adicionar Nova Linha Vazia para Edição", key="btn_add_row"):
-        empty_row = pd.DataFrame([["", None, None]], columns=CACHE_COLUMNS)
-        # Adiciona a linha vazia no topo para facilitar a visualização e edição
-        st.session_state['df_aggrid_data'] = pd.concat([empty_row, st.session_state['df_aggrid_data']], ignore_index=True)
-        st.rerun() 
-
-    st.markdown("Clique **duas vezes (double-click)** na célula para editar. Use o botão **Salvar** abaixo para aplicar as alterações em lote.")
-    
-    df_grid_data = st.session_state['df_aggrid_data']
-    
-    gb = GridOptionsBuilder.from_dataframe(df_grid_data)
-    
-    # Configura colunas
-    gb.configure_column('Endereco_Completo_Cache', headerName="Endereço COMPLETO no Cache (Chave)", editable=True, width=500, wrapText=True, autoHeight=True)
-    gb.configure_columns(['Latitude_Corrigida', 'Longitude_Corrigida'], headerName="Coordenada Corrigida", type=["numericColumn"], precision=6, editable=True, width=150)
-    
-    # Configurações gerais da grid
-    gb.configure_grid_options(
-        domLayout='normal', 
-        enableCellTextSelection=True, 
-        rowHeight=40, 
-        enableCellEditing=True,
-        suppressPropertyNamesCheck=True 
-    )
-    
-    gridOptions = gb.build()
-    
-    # Exibir AgGrid 
-    try:
-        grid_response = AgGrid(
-            df_grid_data, 
-            gridOptions=gridOptions,
-            data_return_mode=DataReturnMode.AS_INPUT,
-            update_mode=GridUpdateMode.VALUE_CHANGED,
-            fit_columns_on_grid_load=False,
-            allow_unsafe_jscode=True, 
-            enable_enterprise_modules=False,
-            height=400,
-            width='100%',
-            reload_data=True,
-            key='raw_cache_editor'
-        )
-        
-        df_edited_cache = grid_response['data']
-        st.session_state['df_aggrid_data'] = df_edited_cache 
-    
-        st.markdown("---")
-        
-        # O botão de salvar
-        if st.button("💾 Salvar Alterações de Geolocalização no Banco de Dados (Em Lote)", key="btn_save_raw_cache"):
-            save_raw_cache_to_db(conn, df_edited_cache)
-            
-    except Exception as e:
-        st.error(f"Erro ao tentar exibir a tabela editável (AgGrid). Erro: {e}")
+    # A seção 3.3 (AgGrid/Edição em Lote) foi removida.

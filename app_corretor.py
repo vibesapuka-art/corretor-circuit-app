@@ -130,7 +130,79 @@ def save_single_entry_to_db(conn, endereco, lat, lon):
         
     except Exception as e:
         st.error(f"Erro ao salvar a correção no banco de dados: {e}")
+        
+        
+def import_cache_to_db(conn, uploaded_file):
+    """Importa o conteúdo de um arquivo (Excel/CSV) para o cache do banco de dados (UPSERT)."""
+    
+    # 1. Leitura do arquivo
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df_import = pd.read_csv(uploaded_file)
+        else: # Assumindo Excel (.xlsx)
+            df_import = pd.read_excel(uploaded_file, sheet_name=0)
+            
+    except Exception as e:
+        st.error(f"Erro ao ler o arquivo: {e}")
+        return 0
 
+    # 2. Validação e Preparação
+    required_cols = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
+    if not all(col in df_import.columns for col in required_cols):
+        st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols)}")
+        return 0
+
+    # Conversão de tipos e limpeza
+    df_import = df_import[required_cols].copy()
+    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
+    
+    # Padroniza coordenadas (troca vírgula por ponto para float)
+    df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    
+    df_import['Latitude_Corrigida'] = pd.to_numeric(df_import['Latitude_Corrigida'], errors='coerce')
+    df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
+    
+    df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
+    
+    if df_import.empty:
+        st.warning("Nenhum dado válido de correção (Lat/Lon) foi encontrado no arquivo para importar.")
+        return 0
+        
+    # 3. Inserção no Banco (UPSERT)
+    insert_count = 0
+    try:
+        with st.spinner(f"Processando a importação de {len(df_import)} linhas..."):
+            for index, row in df_import.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                
+                # Usa a lógica de UPSERT (INSERT OR REPLACE)
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
+                VALUES (?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon))
+                insert_count += 1
+            
+            conn.commit()
+            
+            # 4. Finalização
+            load_geoloc_cache.clear()
+            count_after = len(load_geoloc_cache(conn))
+            
+            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas (atualizadas ou adicionadas). O cache agora tem **{count_after}** entradas.")
+            
+            # Força o recarregamento da tabela na tela
+            st.rerun() 
+            
+            return count_after
+
+    except Exception as e:
+        st.error(f"Erro crítico ao inserir dados no cache. Verifique se o arquivo está correto. Erro: {e}")
+        return 0
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
@@ -742,109 +814,41 @@ def apply_google_coords():
         st.error("Nenhuma coordenada foi colada. Cole o texto do Google Maps, ex: -23,5139753, -52,1131268")
         return
 
-    # Limpeza e padronização: troca **todas** as vírgulas por ponto para garantir o formato float
-    # Em seguida, divide a string em partes não-vazias
-    cleaned_string = coord_string.strip().replace(' ', '')
+    # 1. Pré-limpeza: Remove espaços e tenta isolar o separador principal (que pode ser vírgula ou espaço)
+    coord_string_clean = coord_string.strip()
     
-    # 1. Tenta tratar como uma string que usa a **primeira** vírgula como separador
-    # E todas as outras vírgulas como separador decimal.
-    # Ex: -23,5139753, -52,1131268 -> [-23,5139753, -52,1131268]
-    if ',' in cleaned_string:
-         # Tenta dividir no primeiro separador de Lat/Lon. Isso assume que o separador principal é a vírgula
-         # e os decimais usam vírgula ou ponto (que será tratado a seguir).
-         parts = cleaned_string.split(',')
-         
-         if len(parts) >= 2:
-             # Lat seria a primeira parte, e Lon seria o restante
-             lat_str = parts[0] + '.' + parts[1] # Tenta a concatenação como -23.5139753
-             
-             # Procura a parte da Longitude (que pode começar com espaço)
-             lon_part_index = 2 # A longitude deve ser a terceira parte
-             
-             # Tenta achar o separador da Longitude (separa Lat.decimal, Lon.decimal)
-             
-             # Abordagem mais simples e robusta para entrada de coordenadas (que funciona no Maps):
-             # 1. Separa por espaço ou vírgula.
-             # 2. Tenta converter para float trocando a vírgula por ponto.
-             
-             # Regex para encontrar números flutuantes (incluindo negativos e vírgulas/pontos)
-             # Isso é mais confiável do que a divisão por vírgula.
-             
-             # Tenta encontrar números flutuantes separados por um separador (vírgula/espaço/ponto)
-             # Limpeza prévia para garantir que o separador Lat/Lon seja um espaço + vírgula + espaço
-             coord_string_clean = coord_string.replace(' ', '').replace(',', '#', 1).replace(',', '.').replace('#', ',')
-             
-             # Separa a string agora limpa na vírgula principal
-             parts = coord_string_clean.split(',')
-
-             if len(parts) >= 2:
-                  lat_str = parts[0]
-                  lon_str = parts[1]
-                  
-                  try:
-                      # Converte para float, garantindo que o ponto seja usado como separador decimal
-                      lat = float(lat_str.replace(',', '.').strip()) 
-                      lon = float(lon_str.replace(',', '.').strip())
-                      
-                      # Atualiza a session state dos campos Lat e Lon para exibição
-                      # Exibe usando PONTO, pois é o padrão de dados.
-                      st.session_state['form_new_lat'] = str(lat)
-                      st.session_state['form_new_lon'] = str(lon)
-                      st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
-                      return
-                  except ValueError:
-                      pass # Tenta o próximo método
-            
-    # Se a primeira abordagem falhou, tenta a conversão direta de dois números separados por vírgula
-    # Esta abordagem é menos tolerante a formatos mistos, mas é a mais comum.
-    # Ex: -23.5139753,-52.1131268 ou -23,5139753,-52,1131268
-    
-    # 2. Substitui todas as vírgulas por pontos, exceto a primeira (separador Lat/Lon)
-    # Ex: -23,5139753, -52,1131268 -> -23.5139753,-52.1131268
-    # Se houver apenas uma vírgula (decimal), assume-se que é o separador decimal.
-    
-    # Tentativa de separar nos dois números flutuantes mais óbvios (tratando ',' como decimal se for o único)
-    
-    # Se houver vírgula, assume-se que é o separador decimal e trocamos por ponto para conversão
-    if ',' in coord_string and '.' not in coord_string:
-        clean_for_float = coord_string.replace(',', '.')
-    elif ',' in coord_string and '.' in coord_string:
-        # Se tem ambos (vírgula e ponto), é ambíguo. Tenta dividir pela vírgula (separador Lat/Lon)
-        parts = coord_string.replace(' ', '').split(',')
-        if len(parts) >= 2:
-            lat_str = parts[0]
-            lon_str = parts[1]
-            try:
-                lat = float(lat_str.replace(',', '.').strip())
-                lon = float(lon_str.replace(',', '.').strip())
-                st.session_state['form_new_lat'] = str(lat)
-                st.session_state['form_new_lon'] = str(lon)
-                st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
-                return
-            except ValueError:
-                clean_for_float = coord_string.replace(',', '.', coord_string.count(',') - 1) # Tenta a última vírgula como decimal
-        else:
-            clean_for_float = coord_string
-    else:
-        clean_for_float = coord_string # Já deve estar com ponto ou sem vírgula
-
-    # Tentativa final de extração por regex de dois números flutuantes
-    # Padrão: opcional '-', dígitos, opcional (ponto/vírgula, dígitos)
-    matches = re.findall(r'-?\d+[\.,]\d+', clean_for_float)
-    
-    if len(matches) >= 2:
-        try:
+    try:
+        # Padrão: opcional '-', dígitos, opcional (ponto/vírgula, dígitos)
+        # Regex para extrair números flutuantes de forma robusta
+        matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
+        
+        if len(matches) >= 2:
+            # Tenta a conversão, usando ponto como decimal
             lat = float(matches[0].replace(',', '.'))
             lon = float(matches[1].replace(',', '.'))
             
+            # Atualiza a session state dos campos Lat e Lon para exibição
             st.session_state['form_new_lat'] = str(lat)
             st.session_state['form_new_lon'] = str(lon)
             st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
             return
-        except ValueError:
-            st.error(f"Erro de conversão final. Verifique o formato: '{coord_string}'")
-            return
-
+            
+    except ValueError:
+        # Se falhar a regex/conversão, tenta a divisão simples com a vírgula como separador principal
+        parts = coord_string_clean.split(',')
+        if len(parts) >= 2:
+             try:
+                # Assume que a primeira parte é a Latitude e a segunda a Longitude
+                lat = float(parts[0].replace(',', '.').strip()) 
+                lon = float(parts[1].replace(',', '.').strip())
+                
+                st.session_state['form_new_lat'] = str(lat)
+                st.session_state['form_new_lon'] = str(lon)
+                st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
+                return
+             except ValueError:
+                pass # Falhou, vai para a mensagem de erro final
+                
     st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
 
 
@@ -871,7 +875,7 @@ with tab3:
             "1. Endereço COMPLETO no Cache (Copie e Cole do Circuit)", 
             key="form_new_endereco", 
             height=70,
-            help="Cole o endereço exatamente como o Circuit o reconhece (geralmente com o bairro/cidade no final)."
+            help="Cole o endereço exatamente como o Circuit o reconhece (incluindo o Bairro/Cidade). O sistema remove automaticamente o ' ; ' final, se houver."
         )
         
         st.markdown("---")
@@ -887,7 +891,7 @@ with tab3:
             st.text_input(
                 "2. Colar Coordenadas Google (Ex: -23,5139753, -52,1131268)",
                 key="form_colar_coord",
-                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth ou de outro local."
+                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth. O sistema converterá vírgula decimal para ponto."
             )
         with col_btn_coord:
             st.markdown("##") # Espaço para alinhar o botão
@@ -930,15 +934,17 @@ with tab3:
                     st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar.")
                 else:
                     try:
-                        # Tenta converter para float (trocando a vírgula por ponto se necessário)
+                        # 1. TRATAMENTO DO ENDEREÇO: REMOVE ESPAÇOS E O ";" FINAL
+                        endereco_limpo = new_endereco.strip().rstrip(';')
+                        
+                        # 2. TRATAMENTO DAS COORDENADAS: Converte para float (trocando a vírgula por ponto se necessário)
                         lat = float(str(lat_to_save).strip().replace(',', '.'))
                         lon = float(str(lon_to_save).strip().replace(',', '.'))
                         
-                        # Chama a função de salvamento
-                        save_single_entry_to_db(conn, new_endereco.strip(), lat, lon)
+                        # 3. Chama a função de salvamento
+                        save_single_entry_to_db(conn, endereco_limpo, lat, lon)
                         
-                        # Limpa os campos após o salvamento
-                        clear_lat_lon_fields() 
+                        # 4. Limpa os campos após o salvamento
                         # O rerun irá finalizar a limpeza do endereço
                         
                     except ValueError:
@@ -951,10 +957,60 @@ with tab3:
     
     st.markdown("---")
     
-    # --- Visualização Rápida (Atualizada) ---
     st.subheader(f"3.2 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
     st.caption("Esta tabela mostra os dados atualmente salvos. Use o formulário acima para adicionar ou substituir entradas.")
     
     st.dataframe(df_cache_original, use_container_width=True) 
     
     st.markdown("---")
+    
+    
+    # --- NOVO: BACKUP E RESTAURAÇÃO ---
+    st.header("3.3 Backup e Restauração do Cache")
+    st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
+    
+    col_backup, col_restauracao = st.columns(2)
+    
+    # --- COLUNA DE BACKUP (DOWNLOAD) ---
+    with col_backup:
+        st.markdown("#### 📥 Fazer Backup (Download)")
+        st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
+        
+        def export_cache(df_cache):
+            """Prepara o DataFrame para download em Excel."""
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                # Usa as colunas exatas do cache (colunas requeridas para importação)
+                df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
+            buffer.seek(0)
+            return buffer
+            
+        # Gera o arquivo de backup
+        if not df_cache_original.empty:
+            backup_file = export_cache(df_cache_original)
+            st.download_button(
+                label="⬇️ Baixar Backup do Cache (.xlsx)",
+                data=backup_file,
+                file_name="cache_geolocalizacao_backup.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_backup"
+            )
+        else:
+            st.warning("O cache está vazio, não há dados para baixar.")
+
+
+    # --- COLUNA DE RESTAURAÇÃO (UPLOAD) ---
+    with col_restauracao:
+        st.markdown("#### 📤 Restaurar Cache (Upload)")
+        st.warning("A restauração irá **substituir** entradas existentes (Endereço Completo) se a chave for igual.")
+        
+        uploaded_backup = st.file_uploader(
+            "Arraste o arquivo de Backup (.xlsx ou .csv) aqui:", 
+            type=['csv', 'xlsx'],
+            key="upload_backup"
+        )
+        
+        if uploaded_backup is not None:
+            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
+                with st.spinner('Restaurando dados do arquivo...'):
+                    import_cache_to_db(conn, uploaded_backup)

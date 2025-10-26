@@ -216,4 +216,34 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     # CHAVE DE BUSCA DE CACHE (Lógica Solicitada)
     # Combina o Endereço (da planilha) + Bairro (da planilha) para criar a chave de busca
     df['Chave_Busca_Cache'] = (
-        df[COLUNA_END
+        df[COLUNA_ENDERECO].astype(str).str.strip() + 
+        ', ' + 
+        df[COLUNA_BAIRRO].astype(str).str.strip()
+    )
+    # Limpeza final da chave de busca (remove vírgulas extras se o bairro for vazio)
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*$', '', regex=True)
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*,', ',', regex=True)
+
+    
+    df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
+    df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
+
+    
+    # =========================================================================
+    # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO (100% MATCH)
+    # =========================================================================
+    
+    if not df_cache_geoloc.empty:
+        # Renomeia colunas do cache para evitar conflitos no merge
+        df_cache_lookup = df_cache_geoloc.rename(columns={
+            'Endereco_Completo_Cache': 'Chave_Cache_DB', 
+            'Latitude_Corrigida': 'Cache_Lat',
+            'Longitude_Corrigida': 'Cache_Lon'
+        })
+        
+        # Merge do DataFrame principal com o cache usando a Chave de Busca Combinada
+        df = pd.merge(
+            df, 
+            df_cache_lookup, 
+            left_on='Chave_Busca_Cache', # Chave combinada da planilha
+            right_on='Chave_

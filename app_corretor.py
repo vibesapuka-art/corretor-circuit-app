@@ -5,9 +5,10 @@ from rapidfuzz import process, fuzz
 import io
 import streamlit as st
 import sqlite3 
+import math
 # Importação de st_aggrid (mantido para compatibilidade, mas sem uso prático nas abas)
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-import math
+
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -532,40 +533,36 @@ with tab1:
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
         # -------------------------------------------------------------------------------------
-        # 💡 BLOCO DE CORREÇÃO DO LAYOUT (FORÇA O PREENCHIMENTO POR LINHA: 1, 2, 3, 4, 5...)
+        # 💡 BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
+        # Força o preenchimento criando 5 novas colunas a cada 5 itens
         # -------------------------------------------------------------------------------------
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
-        # Calcula o número de "linhas" que o grid terá
-        items_per_col = math.ceil(total_items / NUM_COLS)
+        
+        # Divide a lista em pedaços de 5 (linhas)
+        chunked_list = [
+            ordens_originais_sorted[i:i + NUM_COLS] 
+            for i in range(0, total_items, NUM_COLS)
+        ]
 
         with st.container(height=300):
-            cols = st.columns(NUM_COLS)
-            
-            # Itera sobre o número de linhas (vertical)
-            for row in range(items_per_col):
-                # Itera sobre cada coluna (horizontal)
-                for col_index in range(NUM_COLS):
-                    
-                    # Calcula o índice na lista TOTAL que corresponde à posição (row, col_index)
-                    # Exemplo (5 colunas):
-                    # (0, 0) -> 0 * 5 + 0 = 0 (Item 1)
-                    # (0, 1) -> 0 * 5 + 1 = 1 (Item 2)
-                    # ...
-                    # (1, 0) -> 1 * 5 + 0 = 5 (Item 6)
-                    item_index = row * NUM_COLS + col_index 
-                    
-                    if item_index < total_items:
-                        order_id = ordens_originais_sorted[item_index]
-                        with cols[col_index]:
-                            is_checked = order_id in st.session_state['volumoso_ids']
-                            st.checkbox(
-                                str(order_id), 
-                                value=is_checked, 
-                                key=f"vol_{order_id}",
-                                on_change=update_volumoso_ids, 
-                                args=(order_id, not is_checked) 
-                            )
+            # Itera sobre cada "linha" (chunk)
+            for row_chunk in chunked_list:
+                # CRÍTICO: Define uma NOVA linha de colunas para este chunk
+                cols = st.columns(len(row_chunk)) 
+                
+                # Itera sobre os itens da linha (1, 2, 3, 4, 5)
+                for col_index, order_id in enumerate(row_chunk):
+                    # Usa o índice para mapear na coluna recém-criada
+                    with cols[col_index]: 
+                        is_checked = order_id in st.session_state['volumoso_ids']
+                        st.checkbox(
+                            str(order_id), 
+                            value=is_checked, 
+                            key=f"vol_{order_id}",
+                            on_change=update_volumoso_ids, 
+                            args=(order_id, not is_checked) 
+                        )
         # -------------------------------------------------------------------------------------
 
 

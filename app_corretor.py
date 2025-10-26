@@ -553,3 +553,225 @@ with tab2:
     df_final_geral = None 
     df_volumosos_impressao = None 
     df_nao_volumosos_impressao = None
+    
+    copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
+    copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
+    copia_data_nao_volumosos = "Nenhum pacote não-volumoso encontrado na rota."
+
+    if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
+        sheet_name = st.text_input(
+            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
+            value=sheet_name_default,
+            key="sheet_name_input"
+        )
+
+    if uploaded_file_pos is not None:
+        try:
+            if uploaded_file_pos.name.endswith('.csv'):
+                df_input_pos = pd.read_csv(uploaded_file_pos)
+            else:
+                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
+            
+            df_input_pos.columns = df_input_pos.columns.str.strip() 
+            df_input_pos.columns = df_input_pos.columns.str.lower()
+            
+
+            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
+            
+            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
+            
+            if df_final_geral is not None and not df_final_geral.empty:
+                st.markdown("---")
+                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
+                
+                df_visualizacao_geral = df_final_geral.copy()
+                df_visualizacao_geral.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                st.dataframe(df_visualizacao_geral, use_container_width=True)
+
+                copia_data_geral = '\n'.join(df_final_geral['Lista de Impressão'].astype(str).tolist())
+                
+                
+                # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
+                st.markdown("---")
+                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
+                
+                if not df_nao_volumosos_impressao.empty:
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos nesta rota.")
+                    
+                    df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
+                    df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_nao_vol, use_container_width=True)
+                    
+                    copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Todos os pedidos nesta rota estão marcados como volumosos ou a lista está vazia.")
+                    
+                # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
+                st.markdown("---")
+                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
+                
+                if not df_volumosos_impressao.empty:
+                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
+                    
+                    df_visualizacao_vol = df_volumosos_impressao.copy()
+                    df_visualizacao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
+                    st.dataframe(df_visualizacao_vol, use_container_width=True)
+                    
+                    copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
+                    
+                else:
+                    st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
+
+
+            else:
+                 copia_data_geral = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
+
+
+        except KeyError as ke:
+            if "Table 3" in str(ke) or "Sheet" in str(ke):
+                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
+            elif 'notes' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
+            elif 'address' in str(ke):
+                 st.error(f"Erro de Coluna: A coluna 'Address' (ou 'address') não foi encontrada. Verifique o arquivo de rota.")
+            else:
+                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
+        except Exception as e:
+            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
+            
+    
+    # Renderização das áreas de cópia e download
+    if uploaded_file_pos is not None:
+        
+        # --- ÁREA DE CÓPIA GERAL ---
+        st.markdown("### 2.3 Copiar para a Área de Transferência (Lista GERAL)")
+        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
+        
+        st.text_area(
+            "Conteúdo da Lista de Impressão GERAL (Alinhado à Esquerda):", 
+            copia_data_geral, 
+            height=300,
+            key="text_area_geral"
+        )
+
+        # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
+        if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (sem o '*').")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_nao_volumosos, 
+                height=150,
+                key="text_area_nao_volumosos"
+            )
+        
+        # --- ÁREA DE CÓPIA VOLUMOSOS ---
+        if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
+            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
+            st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos.")
+            
+            st.text_area(
+                "Conteúdo da Lista de Impressão VOLUMOSOS (Alinhado à Esquerda):", 
+                copia_data_volumosos, 
+                height=150,
+                key="text_area_volumosos"
+            )
+        
+        
+        # --- BOTÕES DE DOWNLOAD ---
+        if df_final_geral is not None and not df_final_geral.empty:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
+                
+                if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
+                    df_nao_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Nao Volumosos')
+                    
+                if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
+                    df_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
+                    
+            buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Baixar Lista Limpa (Excel) - Geral + Separadas",
+                data=buffer,
+                file_name="Lista_Ordem_Impressao_FINAL.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
+                key="download_list"
+            )
+
+
+# ----------------------------------------------------------------------------------
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
+# ----------------------------------------------------------------------------------
+
+with tab3:
+    st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
+    st.info("Edite as coordenadas (Lat/Lon) ou adicione novas entradas. A coluna **'Endereco_Original_Cliente'** deve ser o texto exato que você espera encontrar nas planilhas. (É a chave de busca 100%.)")
+
+    # Carrega o cache (força o @st.cache_data a rodar se houve alteração no save)
+    df_cache_full = load_geoloc_cache(conn).fillna("")
+
+    # Garante que o DataFrame vazio tenha as colunas corretas para o AgGrid iniciar
+    if df_cache_full.empty:
+        df_cache_full = pd.DataFrame(columns=CACHE_COLUMNS).fillna("")
+
+    st.caption(f"Cache atual: **{len(df_cache_full)}** registros.")
+    
+    # --- Diagnóstico e Visualização Nativa ---
+    st.subheader("Visualização Rápida (Streamlit Nativo)")
+    st.info("Se esta tabela aparecer, o DataFrame de dados está correto.")
+    st.dataframe(df_cache_full, use_container_width=True)
+    st.markdown("---")
+    
+    # --- Configuração AgGrid para Edição do Cache ---
+    st.subheader("Cache Editável (AgGrid)")
+    
+    gb = GridOptionsBuilder.from_dataframe(df_cache_full)
+    
+    # Configura colunas (Simplificado)
+    gb.configure_column('Endereco_Original_Cliente', headerName="Endereço Original do Cliente", editable=True, width=400)
+    gb.configure_columns(['Latitude_Corrigida', 'Longitude_Corrigida'], headerName="Coordenada Corrigida", type=["numericColumn"], precision=6, editable=True, width=150)
+    
+    # Configurações gerais da grid (Simplificado para evitar problemas de renderização)
+    gb.configure_grid_options(
+        domLayout='normal', 
+        enableCellTextSelection=True, 
+        rowHeight=40, 
+        enableCellEditing=True,
+        suppressPropertyNamesCheck=True 
+    )
+    
+    gridOptions = gb.build()
+    
+    # Exibir AgGrid 
+    try:
+        grid_response = AgGrid(
+            df_cache_full,
+            gridOptions=gridOptions,
+            data_return_mode=DataReturnMode.AS_INPUT,
+            update_mode=GridUpdateMode.VALUE_CHANGED,
+            fit_columns_on_grid_load=True, 
+            allow_unsafe_jscode=True, 
+            enable_enterprise_modules=False,
+            height=400,
+            width='100%',
+            reload_data=True,
+            key='raw_cache_editor'
+        )
+        
+        df_edited_cache = grid_response['data']
+    
+        st.markdown("---")
+        if st.button("💾 Salvar Alterações de Geolocalização no Banco de Dados", key="btn_save_raw_cache"):
+            # Chamada para a função que salva o DataFrame editado diretamente no cache
+            save_raw_cache_to_db(conn, df_edited_cache)
+            
+    except Exception as e:
+        st.error(f"Erro ao tentar exibir a tabela editável (AgGrid). O problema pode ser na biblioteca `st-aggrid`. Erro: {e}")
+        st.info("A tabela de 'Visualização Rápida' acima deve funcionar como alternativa para verificar o cache.")
+        df_edited_cache = df_cache_full.copy() # Garante que o df_edited_cache tenha um valor de fallback

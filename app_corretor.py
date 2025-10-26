@@ -531,21 +531,28 @@ with tab1:
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
-        # --- CORREÇÃO DE LAYOUT: EXIBIÇÃO LINHA POR LINHA ---
+        # -------------------------------------------------------------------------------------
+        # 💡 BLOCO DE CORREÇÃO DO LAYOUT (FORÇA O PREENCHIMENTO POR LINHA: 1, 2, 3, 4, 5...)
+        # -------------------------------------------------------------------------------------
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
-        # Calcula o número de itens por coluna (arredondado para cima)
+        # Calcula o número de "linhas" que o grid terá
         items_per_col = math.ceil(total_items / NUM_COLS)
 
         with st.container(height=300):
             cols = st.columns(NUM_COLS)
             
-            # Itera sobre o número de "linhas"
+            # Itera sobre o número de linhas (vertical)
             for row in range(items_per_col):
-                # Itera sobre cada coluna naquela "linha"
+                # Itera sobre cada coluna (horizontal)
                 for col_index in range(NUM_COLS):
                     
-                    # Calcula o índice na lista ordenada (1, 2, 3, 4, 5, 6, 7...)
+                    # Calcula o índice na lista TOTAL que corresponde à posição (row, col_index)
+                    # Exemplo (5 colunas):
+                    # (0, 0) -> 0 * 5 + 0 = 0 (Item 1)
+                    # (0, 1) -> 0 * 5 + 1 = 1 (Item 2)
+                    # ...
+                    # (1, 0) -> 1 * 5 + 0 = 5 (Item 6)
                     item_index = row * NUM_COLS + col_index 
                     
                     if item_index < total_items:
@@ -559,7 +566,7 @@ with tab1:
                                 on_change=update_volumoso_ids, 
                                 args=(order_id, not is_checked) 
                             )
-        # --- FIM CORREÇÃO DE LAYOUT ---
+        # -------------------------------------------------------------------------------------
 
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")

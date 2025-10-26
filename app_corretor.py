@@ -55,7 +55,7 @@ CACHE_COLUMNS = ['Endereco_Original_Cliente', 'Latitude_Corrigida', 'Longitude_C
 
 
 # ===============================================
-# FUNÇÕES DE BANCO DE DADOS (SQLite)
+# FUNÇÕES DE BANCO DE Dados (SQLite)
 # ===============================================
 
 @st.cache_resource
@@ -63,7 +63,6 @@ def get_db_connection():
     """
     Cria e retorna a conexão com o banco de dados SQLite.
     """
-    # Adicionando um timeout para aumentar a resiliência da conexão
     conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
     return conn
 
@@ -713,31 +712,50 @@ with tab3:
     st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
     st.info("Edite as coordenadas (Lat/Lon) ou adicione novas entradas. A coluna **'Endereco_Original_Cliente'** deve ser o texto exato que você espera encontrar nas planilhas. (É a chave de busca 100%.)")
 
-    # Carrega o cache (força o @st.cache_data a rodar se houve alteração no save)
-    df_cache_full = load_geoloc_cache(conn).fillna("")
-
-    # Garante que o DataFrame vazio tenha as colunas corretas para o AgGrid iniciar
-    if df_cache_full.empty:
-        df_cache_full = pd.DataFrame(columns=CACHE_COLUMNS).fillna("")
-
-    st.caption(f"Cache atual: **{len(df_cache_full)}** registros.")
+    # 1. Carrega o cache salvo
+    df_cache_original = load_geoloc_cache(conn).fillna("")
+    
+    # 2. Garante que o DataFrame tenha pelo menos uma linha vazia se estiver vazio
+    if df_cache_original.empty:
+        # Se estiver vazio, adiciona uma linha vazia para começar a edição
+        df_for_aggrid = pd.DataFrame([["", None, None]], columns=CACHE_COLUMNS)
+        st.warning("O cache está vazio. Uma linha em branco foi adicionada para você começar a digitar. Use o botão abaixo para adicionar mais.")
+    else:
+        df_for_aggrid = df_cache_original.copy()
+    
+    st.caption(f"Cache atual: **{len(df_cache_original)}** registros.")
     
     # --- Diagnóstico e Visualização Nativa ---
     st.subheader("Visualização Rápida (Streamlit Nativo)")
     st.info("Se esta tabela aparecer, o DataFrame de dados está correto.")
-    st.dataframe(df_cache_full, use_container_width=True)
+    # Uso o DF original para mostrar o que está SALVO.
+    st.dataframe(df_cache_original, use_container_width=True) 
     st.markdown("---")
     
+    # --- Adicionar Nova Linha ---
+    # Usa a session state para manter o estado da adição de linhas
+    if 'df_aggrid_data' not in st.session_state:
+        st.session_state['df_aggrid_data'] = df_for_aggrid
+
+    if st.button("➕ Adicionar Nova Linha em Branco", key="btn_add_row"):
+        # Cria uma linha vazia e concatena no início do DF atual na session_state
+        empty_row = pd.DataFrame([["", None, None]], columns=CACHE_COLUMNS)
+        st.session_state['df_aggrid_data'] = pd.concat([empty_row, st.session_state['df_aggrid_data']], ignore_index=True)
+        # Não é necessário rerun, o AgGrid abaixo usará a session_state
+
     # --- Configuração AgGrid para Edição do Cache ---
     st.subheader("Cache Editável (AgGrid)")
+    st.markdown("**Instruções:** Clique **duas vezes (double-click)** na célula que deseja editar ou preencher.")
     
-    gb = GridOptionsBuilder.from_dataframe(df_cache_full)
+    df_grid_data = st.session_state['df_aggrid_data']
     
-    # Configura colunas (Simplificado)
-    gb.configure_column('Endereco_Original_Cliente', headerName="Endereço Original do Cliente", editable=True, width=400)
+    gb = GridOptionsBuilder.from_dataframe(df_grid_data)
+    
+    # Configura colunas
+    gb.configure_column('Endereco_Original_Cliente', headerName="Endereço Original do Cliente", editable=True, width=400, wrapText=True, autoHeight=True)
     gb.configure_columns(['Latitude_Corrigida', 'Longitude_Corrigida'], headerName="Coordenada Corrigida", type=["numericColumn"], precision=6, editable=True, width=150)
     
-    # Configurações gerais da grid (Simplificado para evitar problemas de renderização)
+    # Configurações gerais da grid
     gb.configure_grid_options(
         domLayout='normal', 
         enableCellTextSelection=True, 
@@ -751,7 +769,7 @@ with tab3:
     # Exibir AgGrid 
     try:
         grid_response = AgGrid(
-            df_cache_full,
+            df_grid_data, # Usa o DF com a possível nova linha
             gridOptions=gridOptions,
             data_return_mode=DataReturnMode.AS_INPUT,
             update_mode=GridUpdateMode.VALUE_CHANGED,
@@ -765,13 +783,15 @@ with tab3:
         )
         
         df_edited_cache = grid_response['data']
+        st.session_state['df_aggrid_data'] = df_edited_cache # Atualiza o state com os dados editados
     
         st.markdown("---")
+        
+        # O botão de salvar
         if st.button("💾 Salvar Alterações de Geolocalização no Banco de Dados", key="btn_save_raw_cache"):
-            # Chamada para a função que salva o DataFrame editado diretamente no cache
             save_raw_cache_to_db(conn, df_edited_cache)
+            # Ao salvar, a página recarrega e o cache será carregado sem as linhas vazias adicionadas.
             
     except Exception as e:
-        st.error(f"Erro ao tentar exibir a tabela editável (AgGrid). O problema pode ser na biblioteca `st-aggrid`. Erro: {e}")
-        st.info("A tabela de 'Visualização Rápida' acima deve funcionar como alternativa para verificar o cache.")
-        df_edited_cache = df_cache_full.copy() # Garante que o df_edited_cache tenha um valor de fallback
+        st.error(f"Erro ao tentar exibir a tabela editável (AgGrid). Erro: {e}")
+        st.info("A tabela de 'Visualização Rápida' deve funcionar para verificar o cache. O erro pode ser na biblioteca `st-aggrid`.")

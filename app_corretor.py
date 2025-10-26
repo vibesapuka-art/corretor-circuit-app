@@ -545,12 +545,7 @@ with tab1:
                 # Itera sobre cada coluna naquela "linha"
                 for col_index in range(NUM_COLS):
                     
-                    # Calcula o índice na lista ordenada
-                    # Ordem: 0, 5, 10... (col 1), 1, 6, 11... (col 2)
-                    # Onde a gente estava errando era aqui.
-                    
-                    # CORREÇÃO: Queremos 1, 2, 3, 4, 5 (Primeira Linha)
-                    # Índice correto para preenchimento por LINHA:
+                    # Calcula o índice na lista ordenada (1, 2, 3, 4, 5, 6, 7...)
                     item_index = row * NUM_COLS + col_index 
                     
                     if item_index < total_items:

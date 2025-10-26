@@ -5,6 +5,7 @@ import uuid
 import os 
 
 # Importação direta do cliente Google Cloud Firestore
+# Nota: Não estamos usando firebase_admin para maior estabilidade neste ambiente.
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
@@ -15,7 +16,7 @@ st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção
 # Variáveis globais simuladas
 APP_ID = "rota_flow_simulacao" 
 
-# Configuração MOCK simplificada (só precisamos do ID do projeto)
+# Configuração MOCK (apenas o ID do projeto)
 MOCK_FIREBASE_CONFIG = {
     "projectId": "mock-project-id" 
 }
@@ -23,7 +24,6 @@ MOCK_FIREBASE_CONFIG = {
 app_id = APP_ID
 
 # --- 1. Inicialização do Firestore ---
-# Esta função agora define a variável de ambiente necessária e inicializa o cliente Firestore.
 @st.cache_resource
 def initialize_firestore():
     """
@@ -35,29 +35,26 @@ def initialize_firestore():
     
     try:
         # CORREÇÃO CRÍTICA: Define a variável de ambiente GOOGLE_CLOUD_PROJECT
-        # Esta é a maneira mais robusta de garantir que o Project ID seja reconhecido.
         os.environ['GOOGLE_CLOUD_PROJECT'] = MOCK_FIREBASE_CONFIG['projectId']
         
-        # Inicializa o cliente Firestore sem argumentos (ele infere o ID do projeto do ambiente)
+        # Inicializa o cliente Firestore
         db = firestore.Client()
         st.session_state['db'] = db
         return db
         
     except Exception as e:
-        # Exibimos o erro, mas o aplicativo deve estar rodando em um ambiente que fornece
-        # credenciais válidas para o Google Cloud/Firebase para funcionar totalmente.
+        # Em um ambiente que não fornece credenciais, isso pode falhar.
+        # Retornamos None para que o aplicativo possa exibir uma mensagem de erro controlada.
         st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
         return None
-
-db: BaseClient = initialize_firestore()
 
 # --- 2. Funções de Manipulação do Dicionário Fixo ---
 def get_fixed_coords(db: BaseClient, app_id: str):
     """Carrega o dicionário de Lat/Lng fixas do Firestore."""
     if not db:
-        return {}
+        # Se o DB não está pronto, retorna um dicionário vazio
+        return {} 
     try:
-        # Caminho onde o dicionário é salvo
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
         doc = doc_ref.get()
         if doc.exists:
@@ -65,8 +62,7 @@ def get_fixed_coords(db: BaseClient, app_id: str):
             return data.get('fixed_coords', {})
         return {}
     except Exception as e:
-        # Se a conexão falhar aqui, o problema é permissão ou conectividade, mas o app deve seguir.
-        st.error(f"Erro ao carregar o dicionário fixo (Banco de Dados Indisponível): {e}")
+        st.error(f"Erro ao carregar o dicionário fixo (Banco de Dados Indisponível): {e}. Usando dicionário vazio.")
         return {}
 
 def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
@@ -74,7 +70,6 @@ def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
     if not db:
         return False
     try:
-        # Caminho onde o dicionário é salvo
         doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
         doc_ref.set({'fixed_coords': fixed_coords_dict})
         return True
@@ -152,20 +147,19 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     
     return df
 
-# --- 4. Interface do Streamlit ---
-
-if 'fixed_coords' not in st.session_state:
-    db_instance = initialize_firestore()
-    st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
+# --- 4. Interface do Streamlit (Função Principal) ---
 
 def main():
-    # A variável db global é definida na inicialização, mas checamos por segurança
+    st.title("🗺️ Pré-Roteirizador & Dicionário Fixo")
+    
+    # 1. Tenta inicializar o DB. Se falhar, exibe a mensagem de erro e sai.
     db_instance = initialize_firestore() 
     if db_instance is None:
-        st.warning("O aplicativo não pode funcionar sem a conexão com o Firestore.")
-        return
+        return # Sai se a inicialização falhou
 
-    st.title("🗺️ Pré-Roteirizador & Dicionário Fixo")
+    # 2. Se o DB estiver pronto, carrega o dicionário para o estado da sessão (se ainda não estiver lá)
+    if 'fixed_coords' not in st.session_state:
+        st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
 
     tab1, tab2 = st.tabs(["1. Processar Planilha (Correção)", "2. Gerenciar Dicionário Fixo"])
 
@@ -183,11 +177,9 @@ def main():
             try:
                 # Determinar o tipo de arquivo
                 if uploaded_file.name.endswith('.csv'):
-                    # Tenta ler o CSV, usando inferência de encoding
                     data = uploaded_file.getvalue().decode('utf-8')
                     df = pd.read_csv(StringIO(data))
                 else:
-                    # Ler Excel (apenas a primeira aba)
                     df = pd.read_excel(uploaded_file)
                 
                 st.success(f"Arquivo '{uploaded_file.name}' lido com sucesso. Total de {len(df)} linhas.")
@@ -216,7 +208,7 @@ def main():
                     st.warning("Preencha o Endereço para adicionar a correção.")
 
                 try:
-                    # 1. Limpeza: Remove espaços e substitui vírgula por ponto
+                    # 1. Limpeza: Remove espaços e substitui vírgula por ponto (para flexibilidade)
                     cleaned_lat = new_lat.strip().replace(',', '.')
                     cleaned_lng = new_lng.strip().replace(',', '.')
 
@@ -231,7 +223,7 @@ def main():
                     if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
                         st.success(f"Correção salva com sucesso para: '{new_address}'")
                     else:
-                        st.error("Falha ao salvar a correção no banco de dados.")
+                        st.error("Falha ao salvar a correção no banco de dados. (Verifique o log de erro acima)")
 
                 except ValueError:
                     # 4. Falha: Exibe a mensagem de erro

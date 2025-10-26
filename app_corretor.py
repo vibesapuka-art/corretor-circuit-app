@@ -4,12 +4,13 @@ import re
 from rapidfuzz import process, fuzz
 import io
 import streamlit as st
-import sqlite3 # Adicionado para conexão com banco de dados nativo
+import sqlite3 
 # IMPORT AGGRID para permitir a edição da geolocalização
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Configurações Iniciais da Página ---
-st.set_page_page_config(
+# ATENÇÃO: Corrigido o erro de digitação no nome da função (set_page_page_config -> set_page_config)
+st.set_page_config(
     page_title="Circuit Flow Completo",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -87,6 +88,7 @@ def create_table_if_not_exists(conn):
     );
     """
     try:
+        # Usa o método .execute() da conexão do st.experimental_connection
         conn.execute(query)
     except Exception as e:
          # Captura e exibe qualquer erro de execução do SQL
@@ -243,59 +245,4 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
             ]
             
             df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
-            if not endereco_oficial_original:
-                 endereco_oficial_original = end_principal 
-            
-            for end_similar in grupo_matches:
-                mapa_correcao[end_similar] = endereco_oficial_original
-                
-        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
-    
-    progresso_bar.empty()
-    st.success("Fuzzy Matching concluído!")
-
-    # Aplicação do Endereço Corrigido (Chave de Agrupamento)
-    df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
-
-    # Agrupamento (Chave: Endereço Corrigido + Cidade)
-    colunas_agrupamento = ['Endereco_Corrigido', 'City'] 
-    
-    df_agrupado = df.groupby(colunas_agrupamento).agg(
-        # Lista de todos os Endereços Originais do Cliente que foram agrupados
-        Enderecos_Originais=(COLUNA_ENDERECO, lambda x: ', '.join(x.astype(str).unique())),
-        
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
-        Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
-        # Mantém a geoloc (que pode ter sido corrigida pelo cache)
-        Latitude=(COLUNA_LATITUDE, 'first'),
-        Longitude=(COLUNA_LONGITUDE, 'first'),
-        
-        # Dados de Suporte
-        Bairro_Agrupado=('Bairro', get_most_common_or_empty),
-        Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
-        
-        Min_Sequence=('Sequence_Num', 'min') 
-        
-    ).reset_index()
-
-    # Ordenação
-    df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
-    
-    # Formatação do DF para o CIRCUIT 
-    endereco_completo_circuit = (
-        df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro_Agrupado'].str.strip() 
-    )
-    endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
-    
-    notas_completas = (
-        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
-        ' | Cidade: ' + df_agrupado['City'] + 
-        ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
-    )
-
-    df_circuit = pd.DataFrame({
-        'Order ID': df_agrupado['Sequences_Agrupadas'], 
-        'Address': endereco_completo_circuit, 
-        'Latitude': df_agrupado['Latitude'],
+            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_END

@@ -5,7 +5,7 @@ from rapidfuzz import process, fuzz
 import io
 import streamlit as st
 import sqlite3 
-# Importação de st_aggrid (Não mais usado na Aba 3, mas mantido para compatibilidade)
+# Importação de st_aggrid (mantido para compatibilidade, mas sem uso prático nas abas)
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
 # --- Configurações Iniciais da Página ---
@@ -130,46 +130,6 @@ def save_single_entry_to_db(conn, endereco, lat, lon):
         
     except Exception as e:
         st.error(f"Erro ao salvar a correção no banco de dados: {e}")
-
-
-# A função save_raw_cache_to_db não é mais usada, mas mantida para caso de reintrodução futura.
-def save_raw_cache_to_db(conn, df_edited_cache):
-    """
-    Salva um DataFrame de cache editado diretamente no banco de dados. 
-    Esta versão NÃO É MAIS USADA NA INTERFACE. Apenas entradas únicas são salvas agora.
-    """
-    df_save = df_edited_cache.copy()
-    
-    # 1. Validação e limpeza (mantém apenas as linhas completas)
-    df_save = df_save.dropna(subset=['Endereco_Completo_Cache'])
-    df_save['Latitude_Corrigida'] = pd.to_numeric(df_save['Latitude_Corrigida'], errors='coerce')
-    df_save['Longitude_Corrigida'] = pd.to_numeric(df_save['Longitude_Corrigida'], errors='coerce')
-    # Requer que Endereço Completo, Lat e Lon estejam presentes
-    df_save = df_save.dropna(subset=['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida'])
-    
-    data_tuples = [tuple(row) for row in df_save[CACHE_COLUMNS].values]
-    
-    try:
-        # 2. **DELETA TODO O CONTEÚDO** (Permite a sincronização completa do estado do AgGrid)
-        conn.execute(f"DELETE FROM {TABLE_NAME};") 
-        
-        # 3. Insere APENAS os registros válidos que estão na tabela AgGrid
-        insert_query = f"""
-        INSERT INTO {TABLE_NAME} 
-        (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-        VALUES (?, ?, ?);
-        """
-        
-        conn.executemany(insert_query, data_tuples)
-        conn.commit()
-        st.success(f"Cache de geolocalização SINCRONIZADO! Foram salvos **{len(data_tuples)}** registros únicos.")
-        
-        # Limpa o cache do Streamlit para forçar o recarregamento na próxima vez
-        load_geoloc_cache.clear() 
-        # Rerun para atualizar a tabela na tela
-        st.rerun() 
-    except Exception as e:
-        st.error(f"Erro ao salvar o cache no banco de dados: {e}")
 
 
 # ===============================================
@@ -762,6 +722,132 @@ with tab2:
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
 # ----------------------------------------------------------------------------------
 
+def clear_lat_lon_fields():
+    """Limpa os campos de Latitude/Longitude e o campo de colar coordenadas."""
+    # O Streamlit guarda o valor no session_state, então precisamos resetá-lo
+    if 'form_new_lat' in st.session_state:
+        st.session_state['form_new_lat'] = ""
+    if 'form_new_lon' in st.session_state:
+        st.session_state['form_new_lon'] = ""
+    if 'form_colar_coord' in st.session_state:
+        st.session_state['form_colar_coord'] = ""
+    if 'form_new_endereco' in st.session_state:
+        st.session_state['form_new_endereco'] = ""
+
+
+def apply_google_coords():
+    """Processa a string colada do Google Maps e preenche Lat/Lon."""
+    coord_string = st.session_state.get('form_colar_coord', '')
+    if not coord_string:
+        st.error("Nenhuma coordenada foi colada. Cole o texto do Google Maps, ex: -23,5139753, -52,1131268")
+        return
+
+    # Limpeza e padronização: troca **todas** as vírgulas por ponto para garantir o formato float
+    # Em seguida, divide a string em partes não-vazias
+    cleaned_string = coord_string.strip().replace(' ', '')
+    
+    # 1. Tenta tratar como uma string que usa a **primeira** vírgula como separador
+    # E todas as outras vírgulas como separador decimal.
+    # Ex: -23,5139753, -52,1131268 -> [-23,5139753, -52,1131268]
+    if ',' in cleaned_string:
+         # Tenta dividir no primeiro separador de Lat/Lon. Isso assume que o separador principal é a vírgula
+         # e os decimais usam vírgula ou ponto (que será tratado a seguir).
+         parts = cleaned_string.split(',')
+         
+         if len(parts) >= 2:
+             # Lat seria a primeira parte, e Lon seria o restante
+             lat_str = parts[0] + '.' + parts[1] # Tenta a concatenação como -23.5139753
+             
+             # Procura a parte da Longitude (que pode começar com espaço)
+             lon_part_index = 2 # A longitude deve ser a terceira parte
+             
+             # Tenta achar o separador da Longitude (separa Lat.decimal, Lon.decimal)
+             
+             # Abordagem mais simples e robusta para entrada de coordenadas (que funciona no Maps):
+             # 1. Separa por espaço ou vírgula.
+             # 2. Tenta converter para float trocando a vírgula por ponto.
+             
+             # Regex para encontrar números flutuantes (incluindo negativos e vírgulas/pontos)
+             # Isso é mais confiável do que a divisão por vírgula.
+             
+             # Tenta encontrar números flutuantes separados por um separador (vírgula/espaço/ponto)
+             # Limpeza prévia para garantir que o separador Lat/Lon seja um espaço + vírgula + espaço
+             coord_string_clean = coord_string.replace(' ', '').replace(',', '#', 1).replace(',', '.').replace('#', ',')
+             
+             # Separa a string agora limpa na vírgula principal
+             parts = coord_string_clean.split(',')
+
+             if len(parts) >= 2:
+                  lat_str = parts[0]
+                  lon_str = parts[1]
+                  
+                  try:
+                      # Converte para float, garantindo que o ponto seja usado como separador decimal
+                      lat = float(lat_str.replace(',', '.').strip()) 
+                      lon = float(lon_str.replace(',', '.').strip())
+                      
+                      # Atualiza a session state dos campos Lat e Lon para exibição
+                      # Exibe usando PONTO, pois é o padrão de dados.
+                      st.session_state['form_new_lat'] = str(lat)
+                      st.session_state['form_new_lon'] = str(lon)
+                      st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
+                      return
+                  except ValueError:
+                      pass # Tenta o próximo método
+            
+    # Se a primeira abordagem falhou, tenta a conversão direta de dois números separados por vírgula
+    # Esta abordagem é menos tolerante a formatos mistos, mas é a mais comum.
+    # Ex: -23.5139753,-52.1131268 ou -23,5139753,-52,1131268
+    
+    # 2. Substitui todas as vírgulas por pontos, exceto a primeira (separador Lat/Lon)
+    # Ex: -23,5139753, -52,1131268 -> -23.5139753,-52.1131268
+    # Se houver apenas uma vírgula (decimal), assume-se que é o separador decimal.
+    
+    # Tentativa de separar nos dois números flutuantes mais óbvios (tratando ',' como decimal se for o único)
+    
+    # Se houver vírgula, assume-se que é o separador decimal e trocamos por ponto para conversão
+    if ',' in coord_string and '.' not in coord_string:
+        clean_for_float = coord_string.replace(',', '.')
+    elif ',' in coord_string and '.' in coord_string:
+        # Se tem ambos (vírgula e ponto), é ambíguo. Tenta dividir pela vírgula (separador Lat/Lon)
+        parts = coord_string.replace(' ', '').split(',')
+        if len(parts) >= 2:
+            lat_str = parts[0]
+            lon_str = parts[1]
+            try:
+                lat = float(lat_str.replace(',', '.').strip())
+                lon = float(lon_str.replace(',', '.').strip())
+                st.session_state['form_new_lat'] = str(lat)
+                st.session_state['form_new_lon'] = str(lon)
+                st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
+                return
+            except ValueError:
+                clean_for_float = coord_string.replace(',', '.', coord_string.count(',') - 1) # Tenta a última vírgula como decimal
+        else:
+            clean_for_float = coord_string
+    else:
+        clean_for_float = coord_string # Já deve estar com ponto ou sem vírgula
+
+    # Tentativa final de extração por regex de dois números flutuantes
+    # Padrão: opcional '-', dígitos, opcional (ponto/vírgula, dígitos)
+    matches = re.findall(r'-?\d+[\.,]\d+', clean_for_float)
+    
+    if len(matches) >= 2:
+        try:
+            lat = float(matches[0].replace(',', '.'))
+            lon = float(matches[1].replace(',', '.'))
+            
+            st.session_state['form_new_lat'] = str(lat)
+            st.session_state['form_new_lon'] = str(lon)
+            st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
+            return
+        except ValueError:
+            st.error(f"Erro de conversão final. Verifique o formato: '{coord_string}'")
+            return
+
+    st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
+
+
 with tab3:
     st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
     st.info("A chave de busca no pré-roteirização é a combinação exata de **Endereço + Bairro** da sua planilha original.")
@@ -772,10 +858,15 @@ with tab3:
     
     # --- NOVO: Formulário de Entrada Rápida ---
     st.subheader("3.1 Adicionar Nova Correção Rápida")
-    st.markdown("Use o formulário abaixo para adicionar uma entrada por vez. Os campos serão **limpos automaticamente** após o salvamento.")
     
-    # Usando st.form com clear_on_submit=True para limpar os campos automaticamente
-    with st.form("quick_cache_entry", clear_on_submit=True):
+    # Container para o formulário
+    with st.container():
+        
+        st.subheader("1. Preencher Endereço")
+        # Inicializa se não existir (para evitar erro ao acessar o estado)
+        if 'form_new_endereco' not in st.session_state:
+            st.session_state['form_new_endereco'] = ""
+            
         new_endereco = st.text_area(
             "1. Endereço COMPLETO no Cache (Copie e Cole do Circuit)", 
             key="form_new_endereco", 
@@ -783,38 +874,87 @@ with tab3:
             help="Cole o endereço exatamente como o Circuit o reconhece (geralmente com o bairro/cidade no final)."
         )
         
-        col_lat, col_lon = st.columns(2)
-        with col_lat:
-            new_latitude = st.text_input("2. Latitude Corrigida", key="form_new_lat")
-        with col_lon:
-            new_longitude = st.text_input("3. Longitude Corrigida", key="form_new_lon")
-            
-        submitted = st.form_submit_button("✅ Salvar Nova Correção no Cache")
+        st.markdown("---")
+        st.subheader("2. Preencher Coordenadas (Use o método mais fácil)")
+        
+        col_input_coord, col_btn_coord = st.columns([3, 1])
+        
+        with col_input_coord:
+            # Inicializa se não existir
+            if 'form_colar_coord' not in st.session_state:
+                st.session_state['form_colar_coord'] = ""
+                
+            st.text_input(
+                "2. Colar Coordenadas Google (Ex: -23,5139753, -52,1131268)",
+                key="form_colar_coord",
+                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth ou de outro local."
+            )
+        with col_btn_coord:
+            st.markdown("##") # Espaço para alinhar o botão
+            st.button(
+                "Aplicar Coordenadas", 
+                on_click=apply_google_coords,
+                key="btn_apply_coord",
+                help="Clique para extrair Latitude e Longitude da caixa de texto acima."
+            )
+        
+        st.caption("--- OU preencha ou ajuste manualmente (deve usar PONTO como separador decimal para evitar erros) ---")
 
-        if submitted:
-            if not new_endereco or not new_latitude or not new_longitude:
-                st.error("Preencha todos os campos para salvar a correção.")
-            else:
-                try:
-                    # Tenta converter para float
-                    lat = float(new_latitude.replace(',', '.'))
-                    lon = float(new_longitude.replace(',', '.'))
-                    
-                    # Chama a função de salvamento
-                    save_single_entry_to_db(conn, new_endereco.strip(), lat, lon)
-                    
-                except ValueError:
-                    st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) ou vírgula (,) como separador decimal.")
+        col_lat, col_lon = st.columns(2)
+        
+        # Inicializa se não existir
+        if 'form_new_lat' not in st.session_state:
+            st.session_state['form_new_lat'] = ""
+        if 'form_new_lon' not in st.session_state:
+            st.session_state['form_new_lon'] = ""
+            
+        with col_lat:
+            # Mantém os valores da session state para permitir o preenchimento automático
+            new_latitude = st.text_input("3. Latitude Corrigida", key="form_new_lat")
+        with col_lon:
+            new_longitude = st.text_input("4. Longitude Corrigida", key="form_new_lon")
+            
+        st.markdown("---")
+        
+        save_button_col, clear_button_col = st.columns(2)
+        
+        with save_button_col:
+            # Botão de salvar - AGORA DENTRO DE UM CALLBACK MANUAL
+            if st.button("✅ Salvar Nova Correção no Cache", key="btn_save_quick"):
+                
+                # Garante que os valores atuais da caixa de texto sejam usados
+                lat_to_save = st.session_state.get('form_new_lat', '')
+                lon_to_save = st.session_state.get('form_new_lon', '')
+                
+                if not new_endereco or not lat_to_save or not lon_to_save:
+                    st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar.")
+                else:
+                    try:
+                        # Tenta converter para float (trocando a vírgula por ponto se necessário)
+                        lat = float(str(lat_to_save).strip().replace(',', '.'))
+                        lon = float(str(lon_to_save).strip().replace(',', '.'))
+                        
+                        # Chama a função de salvamento
+                        save_single_entry_to_db(conn, new_endereco.strip(), lat, lon)
+                        
+                        # Limpa os campos após o salvamento
+                        clear_lat_lon_fields() 
+                        # O rerun irá finalizar a limpeza do endereço
+                        
+                    except ValueError:
+                        st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
+        
+        with clear_button_col:
+             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")
+
 
     
     st.markdown("---")
     
     # --- Visualização Rápida (Atualizada) ---
-    st.subheader(f"3.2 Visualização Rápida do Cache (Total: {len(df_cache_original)})")
-    st.caption("Esta tabela mostra os dados atualmente salvos. Recarregue a página se necessário, ou salve uma nova correção acima.")
-    # Uso o DF original (recarregado após o save) para mostrar o que está SALVO.
+    st.subheader(f"3.2 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
+    st.caption("Esta tabela mostra os dados atualmente salvos. Use o formulário acima para adicionar ou substituir entradas.")
+    
     st.dataframe(df_cache_original, use_container_width=True) 
     
     st.markdown("---")
-    
-    # A seção 3.3 (AgGrid/Edição em Lote) foi removida.

@@ -507,8 +507,16 @@ with tab1:
     if st.session_state['df_original'] is not None:
         
         df_temp = st.session_state['df_original'].copy()
-        df_temp['Order_Num'] = pd.to_numeric(df_temp[COLUNA_SEQUENCE], errors='coerce').fillna(float('inf'))
-        ordens_originais_sorted = df_temp.sort_values('Order_Num')[COLUNA_SEQUENCE].astype(str).unique()
+        
+        # --- NOVO: ORDENAÇÃO NUMÉRICA CORRETA ---
+        # 1. Cria uma coluna auxiliar numérica, removendo '*' se houver
+        df_temp['Order_Num'] = df_temp[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
+        df_temp['Order_Num'] = pd.to_numeric(df_temp['Order_Num'], errors='coerce')
+        
+        # 2. Obtém as ordens únicas e as ordena numericamente
+        df_ordens_unicas = df_temp.drop_duplicates(subset=[COLUNA_SEQUENCE]).sort_values(by='Order_Num')
+        ordens_originais_sorted = df_ordens_unicas[COLUNA_SEQUENCE].astype(str).tolist()
+        # --- FIM NOVO ---
         
         def update_volumoso_ids(order_id, is_checked):
             if is_checked:
@@ -517,6 +525,7 @@ with tab1:
                 st.session_state['volumoso_ids'].remove(order_id)
 
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
+        st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
         # Container para os checkboxes
         with st.container(height=300):
@@ -992,25 +1001,4 @@ with tab3:
                 label="⬇️ Baixar Backup do Cache (.xlsx)",
                 data=backup_file,
                 file_name="cache_geolocalizacao_backup.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_backup"
-            )
-        else:
-            st.warning("O cache está vazio, não há dados para baixar.")
-
-
-    # --- COLUNA DE RESTAURAÇÃO (UPLOAD) ---
-    with col_restauracao:
-        st.markdown("#### 📤 Restaurar Cache (Upload)")
-        st.warning("A restauração irá **substituir** entradas existentes (Endereço Completo) se a chave for igual.")
-        
-        uploaded_backup = st.file_uploader(
-            "Arraste o arquivo de Backup (.xlsx ou .csv) aqui:", 
-            type=['csv', 'xlsx'],
-            key="upload_backup"
-        )
-        
-        if uploaded_backup is not None:
-            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
-                with st.spinner('Restaurando dados do arquivo...'):
-                    import_cache_to_db(conn, uploaded_backup)
+                mime="application/vnd.openxmlformats-officedocument.spreadsheet

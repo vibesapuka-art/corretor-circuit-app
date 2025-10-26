@@ -91,6 +91,7 @@ def load_geoloc_cache(conn):
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
     except pd.io.sql.DatabaseError:
+        # Retorna DataFrame vazio com as colunas corretas se o DB estiver vazio ou a tabela não existir
         return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
         st.error(f"Erro ao carregar cache de geolocalização: {e}")
@@ -212,6 +213,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     
     # =========================================================================
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
+    # O agrupamento ainda é necessário para roteirização, mesmo que a geoloc esteja correta.
     # =========================================================================
     
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
@@ -313,7 +315,6 @@ def processar_rota_para_impressao(df_input):
     coluna_notes_lower = 'notes'
     
     if coluna_notes_lower not in df_input.columns:
-        # F-STRING CORRIGIDA
         raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.") 
     
     df = df_input.copy()
@@ -493,7 +494,7 @@ with tab1:
                 
                 st.metric(
                     label="Endereços Únicos Agrupados",
-                    value=total_agrupados,
+                  value=total_agrupados,
                     delta=f"-{total_entradas - total_agrupados} agrupados"
                 )
                 
@@ -502,155 +503,5 @@ with tab1:
                     df_circuit['Order ID'].astype(str).str.contains(r'\*', regex=True)
                 ].copy()
                 
-                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
-                st.subheader("Arquivo para Roteirização (Circuit)")
-                st.dataframe(df_circuit, use_container_width=True)
-                
-                # Download Circuit 
-                buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
-                    if not df_volumosos_separado.empty:
-                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
-                        st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
-                    else:
-                        st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
-                        
-                buffer_circuit.seek(0)
-                
-                st.download_button(
-                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
-                    data=buffer_circuit,
-                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_excel_circuit"
-                )
-
-
-# ----------------------------------------------------------------------------------
-# ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
-# ----------------------------------------------------------------------------------
-
-with tab2:
-    st.header("2. Limpar Saída do Circuit para Impressão")
-    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
-
-    st.markdown("---")
-    st.subheader("2.1 Carregar Arquivo da Rota")
-
-    uploaded_file_pos = st.file_uploader(
-        "Arraste e solte o arquivo da rota do Circuit aqui (CSV/Excel):", 
-        type=['csv', 'xlsx'],
-        key="file_pos"
-    )
-
-    sheet_name_default = "Table 3" 
-    sheet_name = sheet_name_default
-    
-    df_final_geral = None 
-    df_volumosos_impressao = None 
-    df_nao_volumosos_impressao = None
-    
-    copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
-    copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
-    copia_data_nao_volumosos = "Nenhum pacote não-volumoso encontrado na rota."
-
-    if uploaded_file_pos is not None and uploaded_file_pos.name.endswith('.xlsx'):
-        sheet_name = st.text_input(
-            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=sheet_name_default,
-            key="sheet_name_input"
-        )
-
-    if uploaded_file_pos is not None:
-        try:
-            if uploaded_file_pos.name.endswith('.csv'):
-                df_input_pos = pd.read_csv(uploaded_file_pos)
-            else:
-                df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
-            
-            df_input_pos.columns = df_input_pos.columns.str.strip() 
-            df_input_pos.columns = df_input_pos.columns.str.lower()
-            
-
-            st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
-            
-            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
-            
-            if df_final_geral is not None and not df_final_geral.empty:
-                st.markdown("---")
-                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
-                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
-                
-                df_visualizacao_geral = df_final_geral.copy()
-                df_visualizacao_geral.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
-                st.dataframe(df_visualizacao_geral, use_container_width=True)
-
-                copia_data_geral = '\n'.join(df_final_geral['Lista de Impressão'].astype(str).tolist())
-                
-                
-                # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
-                st.markdown("---")
-                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
-                
-                if not df_nao_volumosos_impressao.empty:
-                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos nesta rota.")
-                    
-                    df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
-                    df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
-                    st.dataframe(df_visualizacao_nao_vol, use_container_width=True)
-                    
-                    copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
-                    
-                else:
-                    st.info("Todos os pedidos nesta rota estão marcados como volumosos ou a lista está vazia.")
-                    
-                # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
-                st.markdown("---")
-                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
-                
-                if not df_volumosos_impressao.empty:
-                    st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos nesta rota.")
-                    
-                    df_visualizacao_vol = df_volumosos_impressao.copy()
-                    df_visualizacao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
-                    st.dataframe(df_visualizacao_vol, use_container_width=True)
-                    
-                    copia_data_volumosos = '\n'.join(df_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
-                    
-                else:
-                    st.info("Nenhum pedido volumoso detectado nesta rota (nenhum '*' encontrado no Order ID).")
-
-
-            else:
-                 copia_data_geral = "O arquivo foi carregado, mas a coluna 'Notes' estava vazia ou o processamento não gerou resultados. Verifique o arquivo de rota do Circuit."
-
-
-        except KeyError as ke:
-            if "Table 3" in str(ke) or "Sheet" in str(ke):
-                st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
-            elif 'notes' in str(ke):
-                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
-            elif 'address' in str(ke):
-                 st.error(f"Erro de Coluna: A coluna 'Address' (ou 'address') não foi encontrada. Verifique o arquivo de rota.")
-            else:
-                 st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
-        except Exception as e:
-            st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se o arquivo da rota (PDF convertido) está no formato CSV ou Excel. Erro: {e}")
-            
-    
-    # Renderização das áreas de cópia e download
-    if uploaded_file_pos is not None:
-        
-        # --- ÁREA DE CÓPIA GERAL ---
-        st.markdown("### 2.3 Copiar para a Área de Transferência (Lista GERAL)")
-        st.info("Para copiar: **Selecione todo o texto** abaixo (Ctrl+A / Cmd+A) e pressione **Ctrl+C / Cmd+C**.")
-        
-        st.text_area(
-            "Conteúdo da Lista de Impressão GERAL (Alinhado à Esquerda):", 
-            copia_data_geral, 
-            height=300,
-            key="text_area_geral"
-        )
-
-        # --- ÁREA DE CÓPIA NÃO-
+                # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO)
+ 

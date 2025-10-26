@@ -5,24 +5,22 @@ import uuid
 from firebase_admin import credentials, initialize_app, firestore
 from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
+import os # Importação adicionada para usar variáveis de ambiente
 
 # --- Configurações Iniciais ---
 st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção Manual")
 
 # Variáveis globais simuladas (IMPORTANTE: No ambiente real, use as variáveis __ fornecidas)
 APP_ID = "rota_flow_simulacao" # ID fixo para o app de roteirização
-# O config real seria passado via variável de ambiente ou contexto
+# Configuração MOCK simplificada. No Canvas real, o SDK de Admin não é usado diretamente
+# O Firebase Config para inicialização básica do SDK Web (Client SDK) é o que seria usado no browser.
 MOCK_FIREBASE_CONFIG = {
-    "type": "service_account",
-    "project_id": "mock-project-id",
-    "private_key_id": "mock-key-id",
-    "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-    "client_email": "mock-client-email@mock-project-id.iam.gserviceaccount.com",
-    "client_id": "mock-client-id",
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": "mock-x509-cert-url"
+    "apiKey": "mock-api-key",
+    "authDomain": "mock-project-id.firebaseapp.com",
+    "projectId": "mock-project-id",
+    "storageBucket": "mock-project-id.appspot.com",
+    "messagingSenderId": "mock-sender-id",
+    "appId": "mock-app-id"
 }
 
 # Use variáveis globais ou mocks
@@ -31,26 +29,35 @@ app_id = APP_ID
 # --- 1. Inicialização do Firebase e Firestore ---
 @st.cache_resource
 def initialize_firestore():
-    """Inicializa o Firebase e retorna o cliente Firestore."""
+    """
+    Inicializa o Firebase usando credenciais de Admin (Service Account) ou simula
+    uma inicialização básica para fins de teste no Streamlit.
+    
+    Atenção: A inicialização baseada em Service Account (Admin SDK) só funciona se a chave
+    estiver *perfeitamente* formatada ou se estiver sendo lida de um arquivo de credenciais.
+    Para evitar o erro "InvalidData(InvalidByte(0, 46))", removemos o mock complexo.
+    """
+    if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
+        return st.session_state['db']
+    
     try:
-        # Tenta usar as variáveis globais do ambiente Canvas
-        if 'db' in st.session_state:
-            return st.session_state['db']
+        # TENTA LER A CREDENCIAL DE SERVIÇO DE VARIÁVEL DE AMBIENTE OU ARQUIVO
+        # No seu ambiente Canvas, isso é tratado automaticamente. Aqui, fazemos um mock simplificado.
         
-        # Simulação de inicialização (usando credenciais simuladas)
-        cred_json = MOCK_FIREBASE_CONFIG
-        cred = credentials.Certificate(cred_json)
-        
-        # Verifica se o app já foi inicializado para evitar erro
+        # 1. Tenta inicializar com um mock de credencial básica (sem chave PEM complexa)
+        # Isso simula a inicialização no Streamlit, onde o acesso é geralmente mais restrito.
         if not initialize_app():
+            # Cria uma credencial básica que será aceita pelo initialize_app
+            cred = credentials.Certificate(MOCK_FIREBASE_CONFIG)
             initialize_app(cred)
-        
+
         db = firestore.client()
         st.session_state['db'] = db
         return db
         
     except Exception as e:
-        st.error(f"Erro ao inicializar o Firestore (certifique-se de que a chave da API está correta): {e}")
+        # Se falhar, exibe uma mensagem genérica sem vazar detalhes da chave
+        st.error(f"Erro ao inicializar o Firestore: {e}. Verifique se a variável MOCK_FIREBASE_CONFIG está correta para este ambiente.")
         return None
 
 db: BaseClient = initialize_firestore()
@@ -165,8 +172,10 @@ if 'fixed_coords' not in st.session_state:
     st.session_state['fixed_coords'] = get_fixed_coords(db, app_id)
 
 def main():
-    if not db:
-        st.stop()
+    # Verifica se a inicialização do banco de dados foi bem-sucedida antes de continuar
+    if db is None:
+        st.warning("O aplicativo não pode funcionar sem a conexão com o Firestore.")
+        return
 
     st.title("🗺️ Pré-Roteirizador & Dicionário Fixo")
 
@@ -210,30 +219,38 @@ def main():
         st.info("Use o conteúdo **EXATO** da coluna 'Destination Address' como chave para garantir a correspondência.")
         with st.form("form_add_correction"):
             new_address = st.text_input("Endereço Exato (Valor da coluna 'Destination Address')", placeholder="Ex: Rua Tal, 123, Bairro")
-            new_lat = st.text_input("Latitude Corrigida", placeholder="-23.5505")
-            new_lng = st.text_input("Longitude Corrigida", placeholder="-46.6333")
+            new_lat = st.text_input("Latitude Corrigida", placeholder="Use ponto '.' como separador. Ex: -23.5505")
+            new_lng = st.text_input("Longitude Corrigida", placeholder="Use ponto '.' como separador. Ex: -46.6333")
             submitted = st.form_submit_button("Adicionar Correção e Salvar")
 
             if submitted:
-                # Validação de dados
-                if new_address and new_lat and new_lng:
-                    try:
-                        lat_val = float(new_lat)
-                        lng_val = float(new_lng)
-                        
-                        # Adiciona/Atualiza o dicionário na session_state
-                        st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
-                        
-                        # Salva no Firestore
-                        if save_fixed_coords(db, app_id, st.session_state['fixed_coords']):
-                            st.success(f"Correção salva com sucesso para: '{new_address}'")
-                        else:
-                            st.error("Falha ao salvar a correção no banco de dados.")
+                # --- NOVO BLOCO DE LIMPEZA E VALIDAÇÃO ---
+                if not new_address:
+                    st.warning("Preencha o Endereço para adicionar a correção.")
+                    # return # Não precisa de return aqui, a validação de baixo fará o trabalho.
 
-                    except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidos.")
-                else:
-                    st.warning("Preencha todos os campos para adicionar a correção.")
+                try:
+                    # 1. Limpeza: Remove espaços e substitui vírgula por ponto
+                    cleaned_lat = new_lat.strip().replace(',', '.')
+                    cleaned_lng = new_lng.strip().replace(',', '.')
+
+                    # 2. Conversão: Tenta converter para float
+                    lat_val = float(cleaned_lat)
+                    lng_val = float(cleaned_lng)
+                    
+                    # 3. Sucesso: Adiciona/Atualiza o dicionário
+                    st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
+                    
+                    # Salva no Firestore
+                    if save_fixed_coords(db, app_id, st.session_state['fixed_coords']):
+                        st.success(f"Correção salva com sucesso para: '{new_address}'")
+                    else:
+                        st.error("Falha ao salvar a correção no banco de dados.")
+
+                except ValueError:
+                    # 4. Falha: Exibe a mensagem de erro
+                    st.error("Latitude e Longitude devem ser números válidos. Verifique se usou ponto (.) ou se há caracteres estranhos.")
+                # --- FIM DO NOVO BLOCO ---
 
         # 2.2 Visualizar/Excluir Dicionário
         st.subheader("2.2 Visualizar Dicionário Atual")

@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import json
 import uuid
-from firebase_admin import credentials, initialize_app, firestore, get_app
+import os 
+
+# Importação direta do cliente Google Cloud Firestore
+from google.cloud import firestore
 from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
-import os 
 
 # --- Configurações Iniciais ---
 st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção Manual")
@@ -13,53 +15,38 @@ st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção
 # Variáveis globais simuladas
 APP_ID = "rota_flow_simulacao" 
 
-# Configuração MOCK com todos os campos necessários para a credencial de serviço
-# Esta estrutura de dicionário é essencial para a função credentials.Certificate
+# Configuração MOCK simplificada (só precisamos do ID do projeto)
 MOCK_FIREBASE_CONFIG = {
-    "type": "service_account",
-    "project_id": "mock-project-id", # Usando project_id conforme esperado por credentials.Certificate
-    "private_key_id": "mock-private-key-id",
-    # A chave privada é uma string que precisa ter as quebras de linha corretas
-    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDhgM8Gg7nUu...\n-----END PRIVATE KEY-----\n", 
-    "client_email": "mock-service-account@mock-project-id.iam.gserviceaccount.com",
-    "client_id": "1234567890",
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/mock-service-account%40mock-project-id.iam.gserviceaccount.com",
-    "universe_domain": "googleapis.com"
+    "projectId": "mock-project-id" 
 }
 
 app_id = APP_ID
 
-# --- 1. Inicialização do Firebase e Firestore ---
+# --- 1. Inicialização do Firestore ---
+# Esta função agora define a variável de ambiente necessária e inicializa o cliente Firestore.
 @st.cache_resource
 def initialize_firestore():
     """
-    Inicializa o Firebase e o cliente Firestore, garantindo que initialize_app()
-    não seja chamado mais de uma vez e que o cliente Firestore seja inicializado corretamente.
+    Inicializa o cliente Firestore, definindo a variável de ambiente GOOGLE_CLOUD_PROJECT 
+    para forçar o reconhecimento do Project ID.
     """
     if 'db' in st.session_state and isinstance(st.session_state['db'], BaseClient):
         return st.session_state['db']
     
     try:
-        # Tenta obter o aplicativo padrão (default app) se ele já existir.
-        try:
-            get_app()
-        except ValueError:
-            # Se não existir (ValueError), inicializa com a credencial
-            cred = credentials.Certificate(MOCK_FIREBASE_CONFIG)
-            initialize_app(cred)
-
-        # CORREÇÃO CRÍTICA: Chama firestore.client() sem argumentos.
-        # Ele deve inferir o projeto a partir da credencial fornecida em initialize_app().
-        db = firestore.client()
+        # CORREÇÃO CRÍTICA: Define a variável de ambiente GOOGLE_CLOUD_PROJECT
+        # Esta é a maneira mais robusta de garantir que o Project ID seja reconhecido.
+        os.environ['GOOGLE_CLOUD_PROJECT'] = MOCK_FIREBASE_CONFIG['projectId']
+        
+        # Inicializa o cliente Firestore sem argumentos (ele infere o ID do projeto do ambiente)
+        db = firestore.Client()
         st.session_state['db'] = db
         return db
         
     except Exception as e:
-        # Mudando a mensagem para refletir a nova estrutura da credencial
-        st.error(f"Erro ao inicializar o Firestore: {e}. Verifique a estrutura da variável MOCK_FIREBASE_CONFIG.")
+        # Exibimos o erro, mas o aplicativo deve estar rodando em um ambiente que fornece
+        # credenciais válidas para o Google Cloud/Firebase para funcionar totalmente.
+        st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
         return None
 
 db: BaseClient = initialize_firestore()
@@ -78,7 +65,8 @@ def get_fixed_coords(db: BaseClient, app_id: str):
             return data.get('fixed_coords', {})
         return {}
     except Exception as e:
-        st.error(f"Erro ao carregar o dicionário fixo: {e}")
+        # Se a conexão falhar aqui, o problema é permissão ou conectividade, mas o app deve seguir.
+        st.error(f"Erro ao carregar o dicionário fixo (Banco de Dados Indisponível): {e}")
         return {}
 
 def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
@@ -91,7 +79,7 @@ def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
         doc_ref.set({'fixed_coords': fixed_coords_dict})
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar o dicionário fixo: {e}")
+        st.error(f"Erro ao salvar o dicionário fixo (Banco de Dados Indisponível): {e}")
         return False
 
 # --- 3. Função de Processamento de Dados (Foco na Correção) ---
@@ -171,8 +159,7 @@ if 'fixed_coords' not in st.session_state:
     st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
 
 def main():
-    # Verifica se a inicialização do banco de dados foi bem-sucedida antes de continuar
-    # db é uma variável global, mas verificamos novamente a instância
+    # A variável db global é definida na inicialização, mas checamos por segurança
     db_instance = initialize_firestore() 
     if db_instance is None:
         st.warning("O aplicativo não pode funcionar sem a conexão com o Firestore.")

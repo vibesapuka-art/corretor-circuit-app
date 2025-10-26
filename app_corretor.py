@@ -1,81 +1,30 @@
 import streamlit as st
 import pandas as pd
-import json
 import uuid
-import os 
-
-# Importação direta do cliente Google Cloud Firestore
-from google.cloud import firestore
-from google.cloud.firestore_v1.base_client import BaseClient
 from io import StringIO
+import os # Mantido por boa prática, embora não use mais o módulo os para o DB
 
 # --- Configurações Iniciais ---
 st.set_page_config(layout="wide", page_title="Otimizador de Rotas com Correção Manual")
 
 # Variáveis globais simuladas
 APP_ID = "rota_flow_simulacao" 
-
-# Configuração MOCK (apenas o ID do projeto)
-MOCK_FIREBASE_CONFIG = {
-    "projectId": "mock-project-id" 
-}
-
 app_id = APP_ID
 
-# --- 1. Inicialização do Firestore ---
-@st.cache_resource
-def initialize_firestore():
+# --- 1. Inicialização do Estado de Sessão (Substitui o DB) ---
+def initialize_session_state():
     """
-    Inicializa o cliente Firestore, definindo a variável de ambiente GOOGLE_CLOUD_PROJECT 
-    para forçar o reconhecimento do Project ID.
+    Inicializa o dicionário de correções no estado de sessão do Streamlit.
+    Este dicionário só persiste enquanto o aplicativo estiver aberto.
     """
-    # Se já estiver no estado da sessão (cache), retorna.
-    if 'db_client' in st.session_state and isinstance(st.session_state['db_client'], BaseClient):
-        return st.session_state['db_client']
-    
-    try:
-        # Define a variável de ambiente GOOGLE_CLOUD_PROJECT
-        os.environ['GOOGLE_CLOUD_PROJECT'] = MOCK_FIREBASE_CONFIG['projectId']
-        
-        # Inicializa o cliente Firestore
-        db = firestore.Client()
-        st.session_state['db_client'] = db # Armazena no estado da sessão
-        return db
-        
-    except Exception as e:
-        # Retorna None em caso de falha de inicialização
-        st.error(f"Erro ao inicializar o Firestore: {e}. O aplicativo não pode funcionar sem a conexão com o banco de dados.")
-        return None
+    if 'fixed_coords' not in st.session_state:
+        # { "Endereço Exato (Destination Address)": {"lat": 12.345, "lng": -56.789} }
+        st.session_state['fixed_coords'] = {}
+        st.info("Dicionário de correções iniciado. Os dados não serão salvos permanentemente.")
 
-# --- 2. Funções de Manipulação do Dicionário Fixo ---
-def get_fixed_coords(db: BaseClient, app_id: str):
-    """Carrega o dicionário de Lat/Lng fixas do Firestore."""
-    if not db:
-        return {} 
-    try:
-        doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
-        doc = doc_ref.get()
-        if doc.exists:
-            data = doc.to_dict()
-            return data.get('fixed_coords', {})
-        return {}
-    except Exception as e:
-        # AQUI garantimos que, se falhar, o app não trave.
-        st.error(f"⚠️ Erro ao tentar carregar o dicionário fixo do Banco de Dados: {e}. Usando dicionário vazio local.")
-        return {}
-
-def save_fixed_coords(db: BaseClient, app_id: str, fixed_coords_dict: dict):
-    """Salva o dicionário de Lat/Lng fixas no Firestore."""
-    if not db:
-        st.error("Falha ao salvar. Conexão com o Firestore indisponível.")
-        return False
-    try:
-        doc_ref = db.collection('artifacts').document(app_id).collection('public').document('correcoes_fixas')
-        doc_ref.set({'fixed_coords': fixed_coords_dict})
-        return True
-    except Exception as e:
-        st.error(f"Erro ao salvar o dicionário fixo (Banco de Dados Indisponível): {e}")
-        return False
+# --- 2. Funções de Manipulação do Dicionário Fixo (Usando Session State) ---
+# NOTE: Não há mais funções save/get para o banco de dados.
+# O dicionário st.session_state['fixed_coords'] é a fonte de verdade local.
 
 # --- 3. Função de Processamento de Dados (Foco na Correção) ---
 def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
@@ -100,12 +49,12 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
 
     # --- LÓGICA DE CORREÇÃO ---
     
-    # 1. Mapeamento
+    # 1. Mapeamento: Aplica o dicionário de correção na coluna de endereço.
     df[['Fixed_Lat', 'Fixed_Lng']] = df['Destination Address'].map(fixed_coords_dict).apply(
         lambda x: pd.Series(x) if isinstance(x, dict) else pd.Series([None, None])
     )
     
-    # 2. Priorizar a correção manual sobre os valores existentes
+    # 2. Priorizar a correção manual sobre os valores existentes (combine_first)
     df['Latitude'] = df['Fixed_Lat'].combine_first(df['Latitude'])
     df['Longitude'] = df['Fixed_Lng'].combine_first(df['Longitude'])
     
@@ -115,7 +64,7 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     correcoes_aplicadas = df['Fixed_Lat'].notnull().sum()
     st.success(f"✅ {correcoes_aplicadas} correções manuais do Dicionário Fixo aplicadas com sucesso.")
 
-    # 3. Identificar pontos sem Lat/Lng válida (que não foram corrigidos e vieram nulos/inválidos)
+    # 3. Identificar pontos sem Lat/Lng válida
     invalid_rows = df[df['Latitude'].isna() | df['Longitude'].isna()]
     if not invalid_rows.empty:
         st.error(f"🚨 {len(invalid_rows)} registros permanecem com Lat/Lng inválida após a correção.")
@@ -131,6 +80,7 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
     st.subheader("Saída Final")
     st.dataframe(df.head())
     
+    # Botão de Download
     csv = df.to_csv(index=False)
     st.download_button(
         label="Download Dados Processados (CSV)",
@@ -146,21 +96,10 @@ def process_data(df: pd.DataFrame, fixed_coords_dict: dict):
 def main():
     st.title("🗺️ Pré-Roteirizador & Dicionário Fixo")
     
-    # 1. Tenta inicializar o DB. Se falhar, exibe a mensagem de erro e sai.
-    db_instance = initialize_firestore() 
-    if db_instance is None:
-        return # Sai se a inicialização falhou
+    # Inicializa o dicionário de correções (sempre executa no início)
+    initialize_session_state()
 
-    # 2. Se o DB estiver pronto, carrega o dicionário para o estado da sessão (se ainda não estiver lá)
-    if 'fixed_coords' not in st.session_state:
-        # Tentativa de carregar o dicionário. Se falhar, apenas usa um dicionário vazio.
-        st.session_state['fixed_coords'] = get_fixed_coords(db_instance, app_id)
-
-    # --- Ponto de Verificação CRÍTICO ---
-    # Se você vir esta mensagem, o app está carregando 100% da interface.
-    # Caso contrário, o crash é na linha acima.
-    st.info(f"Conexão OK. Dicionário carregado com {len(st.session_state['fixed_coords'])} correções.")
-
+    # O código começa a renderizar a interface aqui.
     tab1, tab2 = st.tabs(["1. Processar Planilha (Correção)", "2. Gerenciar Dicionário Fixo"])
 
     # --- TAB 1: Processamento ---
@@ -175,6 +114,7 @@ def main():
 
         if uploaded_file:
             try:
+                # Determinar o tipo de arquivo
                 if uploaded_file.name.endswith('.csv'):
                     data = uploaded_file.getvalue().decode('utf-8')
                     df = pd.read_csv(StringIO(data))
@@ -183,6 +123,7 @@ def main():
                 
                 st.success(f"Arquivo '{uploaded_file.name}' lido com sucesso. Total de {len(df)} linhas.")
 
+                # Executa o processamento
                 process_data(df.copy(), st.session_state['fixed_coords'])
                 
             except Exception as e:
@@ -192,40 +133,45 @@ def main():
     with tab2:
         st.header("2. Gerenciar Dicionário Fixo de Lat/Lng")
         
+        # 2.1 Adicionar/Atualizar Correção
         st.subheader("2.1 Adicionar Nova Correção")
         st.info("Use o conteúdo **EXATO** da coluna 'Destination Address' como chave para garantir a correspondência.")
         with st.form("form_add_correction"):
             new_address = st.text_input("Endereço Exato (Valor da coluna 'Destination Address')", placeholder="Ex: Rua Tal, 123, Bairro")
             new_lat = st.text_input("Latitude Corrigida", placeholder="Use ponto '.' como separador. Ex: -23.5505")
             new_lng = st.text_input("Longitude Corrigida", placeholder="Use ponto '.' como separador. Ex: -46.6333")
-            submitted = st.form_submit_button("Adicionar Correção e Salvar")
+            submitted = st.form_submit_button("Adicionar Correção") # Removido 'e Salvar' pois não há DB
 
             if submitted:
                 if not new_address:
                     st.warning("Preencha o Endereço para adicionar a correção.")
+                else:
+                    try:
+                        # 1. Limpeza: Remove espaços e substitui vírgula por ponto (para flexibilidade)
+                        cleaned_lat = new_lat.strip().replace(',', '.')
+                        cleaned_lng = new_lng.strip().replace(',', '.')
 
-                try:
-                    cleaned_lat = new_lat.strip().replace(',', '.')
-                    cleaned_lng = new_lng.strip().replace(',', '.')
+                        # 2. Conversão: Tenta converter para float
+                        lat_val = float(cleaned_lat)
+                        lng_val = float(cleaned_lng)
+                        
+                        # 3. Sucesso: Adiciona/Atualiza o dicionário no estado de sessão
+                        st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
+                        
+                        st.success(f"Correção salva LOCALMENTE com sucesso para: '{new_address}'")
+                        st.experimental_rerun() # Recarrega para atualizar a visualização da tabela
 
-                    lat_val = float(cleaned_lat)
-                    lng_val = float(cleaned_lng)
-                    
-                    st.session_state['fixed_coords'][new_address] = {'lat': lat_val, 'lng': lng_val}
-                    
-                    if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
-                        st.success(f"Correção salva com sucesso para: '{new_address}'")
-                    else:
-                        st.error("Falha ao salvar a correção no banco de dados.")
-
-                except ValueError:
-                    st.error("Latitude e Longitude devem ser números válidos. Verifique se usou ponto (.) ou se há caracteres estranhos.")
+                    except ValueError:
+                        # 4. Falha: Exibe a mensagem de erro
+                        st.error("Latitude e Longitude devem ser números válidos. Verifique se usou ponto (.) ou se há caracteres estranhos.")
 
         # 2.2 Visualizar/Excluir Dicionário
-        st.subheader("2.2 Visualizar Dicionário Atual")
+        st.subheader("2.2 Visualizar Dicionário Atual (Local)")
+        st.info("Este dicionário é LOCAL e será perdido se você fechar o navegador.")
         
         fixed_coords = st.session_state['fixed_coords']
         if fixed_coords:
+            # Converte para DataFrame para visualização fácil
             data_list = []
             for address, coords in fixed_coords.items():
                 data_list.append({
@@ -237,6 +183,7 @@ def main():
             df_fixed = pd.DataFrame(data_list)
             st.dataframe(df_fixed, use_container_width=True, height=300)
 
+            # Opção de Excluir
             address_to_delete = st.selectbox(
                 "Selecione o endereço para remover (opcional):",
                 [""] + list(fixed_coords.keys())
@@ -245,11 +192,8 @@ def main():
             if st.button("Remover Correção Selecionada"):
                 if address_to_delete and address_to_delete in fixed_coords:
                     del st.session_state['fixed_coords'][address_to_delete]
-                    if save_fixed_coords(db_instance, app_id, st.session_state['fixed_coords']):
-                        st.success(f"Correção para '{address_to_delete}' removida com sucesso. Recarregue a página para atualizar a visualização.")
-                        st.rerun()
-                    else:
-                        st.error("Falha ao remover a correção no banco de dados.")
+                    st.success(f"Correção para '{address_to_delete}' removida com sucesso. ")
+                    st.experimental_rerun()
                 elif address_to_delete:
                     st.warning("Endereço não encontrado no dicionário.")
         else:

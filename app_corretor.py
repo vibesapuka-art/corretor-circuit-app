@@ -208,6 +208,28 @@ def import_cache_to_db(conn, uploaded_file):
     except Exception as e:
         st.error(f"Erro crítico ao inserir dados no cache. Verifique se o arquivo está correto. Erro: {e}")
         return 0
+        
+# ------------------------------------------------------------------
+# NOVO: FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
+# ------------------------------------------------------------------
+def clear_geoloc_cache_db(conn):
+    """Exclui todos os dados da tabela de cache de geolocalização."""
+    
+    # Exclui todos os registros da tabela
+    query = f"DELETE FROM {TABLE_NAME};"
+    
+    try:
+        conn.execute(query)
+        conn.commit()
+        
+        # Limpa o cache de dados do Streamlit e força recarregamento
+        load_geoloc_cache.clear()
+        st.success("✅ **Sucesso!** Todos os dados do cache de geolocalização foram excluídos permanentemente.")
+        st.rerun() 
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao limpar o cache: {e}")
+
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
@@ -1059,3 +1081,24 @@ with tab3:
             if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
                 with st.spinner('Restaurando dados do arquivo...'):
                     import_cache_to_db(conn, uploaded_backup)
+                    
+    # ----------------------------------------------------------------------------------
+    # NOVO BLOCO V26: LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.header("3.4 Limpar TODO o Cache de Geolocalização")
+    st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas no cache do sistema.")
+    
+    # Usa um checkbox de confirmação para evitar cliques acidentais
+    if len(df_cache_original) > 0:
+        confirm_clear = st.checkbox(
+            f"Eu confirmo que desejo excluir permanentemente **{len(df_cache_original)}** entradas do cache.", 
+            key="confirm_clear_cache"
+        )
+        
+        if confirm_clear:
+            if st.button("🔴 EXCLUIR TODOS OS DADOS DO CACHE AGORA", key="btn_final_clear_cache"):
+                # Chama a função de limpeza do banco de dados
+                clear_geoloc_cache_db(conn)
+    else:
+        st.info("O cache já está vazio. Não há dados para excluir.")

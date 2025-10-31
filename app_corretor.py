@@ -500,13 +500,14 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         df_agrupado['Notes_Alternativas'] # V29: ANEXA A NOTA ALTERNATIVA
     )
 
+    # V32: MANTEMOS AS COLUNAS ALT_ AQUI PARA REFERÊNCIA E VISUALIZAÇÃO INTERNA.
+    # O FILTRO PARA REMOVÊ-LAS DO EXCEL SERÁ FEITO NO MOMENTO DO DOWNLOAD (LINHA 454).
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas,
-        # V29: NOVAS COLUNAS PARA SUBSTITUIÇÃO MANUAL
         'Alt_Address': df_agrupado['Alt_Addresses_List'].replace('', None), 
         'Alt_LatLon': df_agrupado['Alt_LatLon']
     }) 
@@ -788,7 +789,7 @@ with tab1:
                 
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("Arquivo para Roteirização (Circuit)")
-                st.info("Colunas `Alt_Address` e `Alt_LatLon` estão no Excel para substituição manual no Circuit, se necessário.")
+                st.info("O arquivo de download contém apenas as 5 colunas padrão do Circuit (`Order ID`, `Address`, `Latitude`, `Longitude`, `Notes`).")
                 
                 # Exibe apenas as colunas principais para visualização
                 df_display = df_circuit[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']].copy()
@@ -796,12 +797,17 @@ with tab1:
                 
                 # Download Circuit 
                 buffer_circuit = io.BytesIO()
+                
+                # V32: Define as colunas que devem ser exportadas (APENAS as 5 padrão)
+                circuit_cols = ['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']
+                
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    # Escreve TODAS as colunas, incluindo as Alt_
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral') 
+                    # V32: Escreve APENAS as colunas padrão do Circuit
+                    df_circuit[circuit_cols].to_excel(writer, index=False, sheet_name='Circuit_Import_Geral') 
                     
                     if not df_volumosos_separado.empty:
-                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        # V32: Garante que a aba de volumosos também só tenha as colunas padrão
+                        df_volumosos_separado[circuit_cols].to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
                         st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
                     else:
                         st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
@@ -1159,7 +1165,7 @@ with tab3:
                         # O rerun irá finalizar a limpeza do endereço
                         
                     except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
+                        st.error("Latitude e Longitude devem ser números válidas. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
         
         with clear_button_col:
              st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")

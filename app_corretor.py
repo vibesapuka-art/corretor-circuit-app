@@ -11,7 +11,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 
 # --- Configurações Iniciais da Página ---
-st.set_page_page_config(
+st.set_page_config(
     page_title="Circuit Flow Completo",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -210,7 +210,7 @@ def import_cache_to_db(conn, uploaded_file):
         return 0
         
 # ------------------------------------------------------------------
-# FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
+# NOVO: FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
 # ------------------------------------------------------------------
 def clear_geoloc_cache_db(conn):
     """Exclui todos os dados da tabela de cache de geolocalização."""
@@ -426,7 +426,7 @@ def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     
-    V27: CORREÇÃO CRÍTICA do filtro de Não-Volumosos.
+    V25: Corrigido o filtro de Não-Volumosos para incluir agrupamentos mistos.
     """
     coluna_notes_lower = 'notes'
     
@@ -437,13 +437,12 @@ def processar_rota_para_impressao(df_input):
     df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
     df = df.dropna(subset=[coluna_notes_lower]) 
     
-    # Coluna "Ordem ID" é o primeiro campo antes do ';'
-    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
-    # 1. Tira as aspas extras, se houver, e tira espaços
-    df['Ordem ID'] = df_split[0].astype(str).str.strip().str.strip('"') 
-    df['Anotações Completas'] = df_split[1].astype(str).str.strip().str.strip('"') if 1 in df_split.columns else ""
+    df[coluna_notes_lower] = df[coluna_notes_lower].str.strip('"')
     
-    # DataFrame GERAL (Para Cópia e Download)
+    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
+    df['Ordem ID'] = df_split[0].str.strip()
+    df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
+    
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
@@ -456,25 +455,18 @@ def processar_rota_para_impressao(df_input):
     # =========================================================================
     # 1. FILTRAR VOLUMOSOS
     # Critério: O agrupamento contém PELO MENOS UM item com '*'
-    # Lógica: Se a coluna 'Ordem ID' contém '*', é um volumoso (puro ou misto)
     # =========================================================================
-    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
+    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=True, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V27)
-    # Critério: O agrupamento contém PELO MENOS UM ID sem o caractere '*'
-    # Lógica: O ID deve conter uma sequência de números (\d+) que NÃO é seguida por um * (\*)
-    # Ex: '12,13*,14*' casa com '12' -> Fica
-    # Ex: '13*,14*' não casa com nada (só tem IDs com *) -> Sai
+    # 2. FILTRAR NÃO-VOLUMOSOS
+    # Critério V25 (CORRIGIDO): O agrupamento contém PELO MENOS UM item SEM '*'
+    # Regex: '\d+(?!\*)' procura por um número (\d+) que NÃO é seguido imediatamente por um '*' ((?!\*))
+    # Ex: '12,13*,14*' casa com '12' (aparece no não-volumoso)
+    # Ex: '13*,14*' não casa com nada (não aparece no não-volumoso)
     # =========================================================================
-    # Regex: Procura por uma borda de palavra (\b) seguida por um ou mais dígitos (\d+) 
-    # que NÃO são seguidos por um asterisco: (?![\*])
-    # O uso do \b e (?![\*]) garante que só pegamos IDs puros.
-    
-    # Se contém números (IDs) que NÃO SÃO seguidos por * no final, é um não-volumoso
-    df_nao_volumosos = df[df['Ordem ID'].str.contains(r'\b\d+\b(?![\*])', regex=True, na=False)].copy() 
-    
+    df_nao_volumosos = df[df['Ordem ID'].str.contains(r'\d+(?!\*)', regex=True, na=False)].copy() 
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
@@ -574,7 +566,7 @@ with tab1:
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
         # -------------------------------------------------------------------------------------
-        # BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
+        # 💡 BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
         # Força o preenchimento criando 5 novas colunas a cada 5 itens
         # -------------------------------------------------------------------------------------
         NUM_COLS = 5
@@ -735,7 +727,7 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V27 APLICADA AQUI)
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V25 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
@@ -765,7 +757,7 @@ with tab2:
                     copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Nenhum pacote não-volumoso encontrado nesta rota (todos os pedidos são volumosos ou a lista está vazia).")
+                    st.info("Todos os pedidos nesta rota estão marcados como volumosos (ou a lista está vazia).")
                     
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")
@@ -1091,7 +1083,7 @@ with tab3:
                     import_cache_to_db(conn, uploaded_backup)
                     
     # ----------------------------------------------------------------------------------
-    # BLOCO V26: LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
+    # NOVO BLOCO V26: LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
     # ----------------------------------------------------------------------------------
     st.markdown("---")
     st.header("3.4 Limpar TODO o Cache de Geolocalização")

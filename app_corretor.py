@@ -426,8 +426,7 @@ def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     
-    V28: CORREÇÃO CRÍTICA do filtro de Não-Volumosos para ignorar números do endereço, 
-         filtrando apenas pelos IDs na coluna 'Ordem ID'.
+    V27: CORREÇÃO CRÍTICA do filtro de Não-Volumosos.
     """
     coluna_notes_lower = 'notes'
     
@@ -455,31 +454,29 @@ def processar_rota_para_impressao(df_input):
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 1. FILTRAR VOLUMOSOS (Lógica mantida, pois está correta)
+    # 1. FILTRAR VOLUMOSOS
     # Critério: O agrupamento contém PELO MENOS UM item com '*'
+    # Lógica: Se a coluna 'Ordem ID' contém '*', é um volumoso (puro ou misto)
     # =========================================================================
     df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V28)
+    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V27)
     # Critério: O agrupamento contém PELO MENOS UM ID sem o caractere '*'
+    # Lógica: O ID deve conter uma sequência de números (\d+) que NÃO é seguida por um * (\*)
+    # Ex: '12,13*,14*' casa com '12' -> Fica
+    # Ex: '13*,14*' não casa com nada (só tem IDs com *) -> Sai
     # =========================================================================
+    # Regex: Procura por uma borda de palavra (\b) seguida por um ou mais dígitos (\d+) 
+    # que NÃO são seguidos por um asterisco: (?![\*])
+    # O uso do \b e (?![\*]) garante que só pegamos IDs puros.
     
-    # Passo 1: Extrair APENAS a lista de IDs (tudo que está ANTES do " - " na coluna Ordem ID)
-    # Ex: "121*,122 - Herbert José de Souza..." -> Pega "121*,122"
-    df['Lista_IDs'] = df['Ordem ID'].str.split(' - ', n=1, expand=True)[0]
-    
-    # Passo 2: Aplicar a Regex APENAS na Lista de IDs (ignorando o endereço)
-    # Regex: Procura por um ou mais dígitos (\d+) que NÃO são seguidos por um asterisco (?![\*])
-    # Como 'Lista_IDs' não contém o número do endereço, essa busca é segura.
-    df_nao_volumosos = df[df['Lista_IDs'].str.contains(r'\d+(?![\*])', regex=True, na=False)].copy() 
+    # Se contém números (IDs) que NÃO SÃO seguidos por * no final, é um não-volumoso
+    df_nao_volumosos = df[df['Ordem ID'].str.contains(r'\b\d+\b(?![\*])', regex=True, na=False)].copy() 
     
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
-    # Remove a coluna auxiliar
-    df = df.drop(columns=['Lista_IDs'], errors='ignore')
-
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
 
 
@@ -578,6 +575,7 @@ with tab1:
 
         # -------------------------------------------------------------------------------------
         # BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
+        # Força o preenchimento criando 5 novas colunas a cada 5 itens
         # -------------------------------------------------------------------------------------
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
@@ -737,7 +735,7 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V28 APLICADA AQUI)
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V27 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:

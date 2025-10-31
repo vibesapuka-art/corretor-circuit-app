@@ -6,6 +6,7 @@ import io
 import streamlit as st
 import sqlite3 
 import math
+# Importação de st_aggrid (mantido para compatibilidade, mas sem uso prático nas abas)
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
 
@@ -56,18 +57,12 @@ COLUNA_BAIRRO = 'Bairro'
 # --- Configurações de MIME Type (CORREÇÃO DE ERRO) ---
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-# --- Configurações de Banco de Dados (GERAL) ---
+# --- Configurações de Banco de Dados ---
 DB_NAME = "geoloc_cache.sqlite"
-
-# --- Configurações de Cache de Geolocalização (Lat/Lon Principal) ---
 TABLE_NAME = "correcoes_geoloc_v3" 
+# Estrutura do Cache (Endereço Completo + Lat/Lon)
 CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
 PRIMARY_KEYS = ['Endereco_Completo_Cache'] 
-
-# --- V30: Configurações de Cache de Endereço Alternativo (Alt Address) ---
-ALT_ADDRESS_TABLE_NAME = "alt_address_cache_v1"
-# O Endereco_Principal_Cache é a chave de busca (Endereço + Bairro)
-ALT_CACHE_COLUMNS = ['Endereco_Principal_Cache', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude']
 
 
 # ===============================================
@@ -76,12 +71,15 @@ ALT_CACHE_COLUMNS = ['Endereco_Principal_Cache', 'Alt_Address', 'Alt_Latitude', 
 
 @st.cache_resource
 def get_db_connection():
-    """Cria e retorna a conexão com o banco de dados SQLite."""
+    """
+    Cria e retorna a conexão com o banco de dados SQLite.
+    """
     conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
     return conn
 
 def create_table_if_not_exists(conn):
-    """Cria a tabela de cache de geolocalização principal se ela não existir."""
+    """Cria a tabela de cache de geolocalização se ela não existir."""
+    # PRIMARY KEY composta pelo Endereço Completo
     pk_str = ', '.join(PRIMARY_KEYS)
     query = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
@@ -92,60 +90,33 @@ def create_table_if_not_exists(conn):
     """
     try:
         conn.execute(query)
-    except Exception as e:
-        st.error(f"Erro ao criar tabela de Geoloc: {e}")
-
-# V30: Nova Função - Cria a tabela de Cache de Endereço Alternativo
-def create_alt_address_table_if_not_exists(conn):
-    """Cria a tabela de cache de endereço alternativo se ela não existir."""
-    query = f"""
-    CREATE TABLE IF NOT EXISTS {ALT_ADDRESS_TABLE_NAME} (
-        Endereco_Principal_Cache TEXT PRIMARY KEY,
-        Alt_Address TEXT,
-        Alt_Latitude REAL,
-        Alt_Longitude REAL
-    );
-    """
-    try:
-        conn.execute(query)
         conn.commit()
     except Exception as e:
-        st.error(f"Erro ao criar tabela de Alt Address: {e}")
+        st.error(f"Erro ao criar tabela: {e}")
+
 
 # CORREÇÃO CRÍTICA (UnhashableParamError)
 @st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
 def load_geoloc_cache(conn):
     """Carrega todo o cache de geolocalização para um DataFrame."""
     try:
+        # Tenta carregar a nova tabela
         df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
     except pd.io.sql.DatabaseError:
+        # Retorna DataFrame vazio com as colunas corretas
         return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
         st.error(f"Erro ao carregar cache de geolocalização: {e}")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
-# V30: Nova Função - Carrega o Cache de Endereço Alternativo
-@st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
-def load_alt_address_cache(conn):
-    """Carrega todo o cache de endereço alternativo para um DataFrame."""
-    try:
-        df_cache = pd.read_sql_query(f"SELECT * FROM {ALT_ADDRESS_TABLE_NAME}", conn)
-        df_cache['Alt_Latitude'] = pd.to_numeric(df_cache['Alt_Latitude'], errors='coerce')
-        df_cache['Alt_Longitude'] = pd.to_numeric(df_cache['Alt_Longitude'], errors='coerce')
-        return df_cache
-    except pd.io.sql.DatabaseError:
-        return pd.DataFrame(columns=ALT_CACHE_COLUMNS)
-    except Exception as e:
-        st.error(f"Erro ao carregar cache de endereço alternativo: {e}")
-        return pd.DataFrame(columns=ALT_CACHE_COLUMNS)
-
 
 def save_single_entry_to_db(conn, endereco, lat, lon):
-    """Salva uma única entrada (Endereço Completo + Lat/Lon) no cache principal (UPSERT)."""
+    """Salva uma única entrada (Endereço Completo + Lat/Lon) no cache (UPSERT)."""
     
+    # Query de UPSERT com a nova estrutura
     upsert_query = f"""
     INSERT OR REPLACE INTO {TABLE_NAME} 
     (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
@@ -157,37 +128,17 @@ def save_single_entry_to_db(conn, endereco, lat, lon):
         conn.commit()
         st.success(f"Correção salva para: **{endereco}**.")
         
+        # Limpa o cache do Streamlit para forçar o recarregamento na próxima vez
         load_geoloc_cache.clear() 
+        # Rerun para atualizar a tabela na tela imediatamente
         st.rerun() 
         
     except Exception as e:
         st.error(f"Erro ao salvar a correção no banco de dados: {e}")
-
-# V30: Nova Função - Salva uma única entrada no Cache de Endereço Alternativo
-def save_single_alt_entry_to_db(conn, endereco_principal, alt_address, alt_lat, alt_lon):
-    """Salva uma única entrada (Endereço Principal + Alt Address/Lat/Lon) no cache alternativo (UPSERT)."""
-    
-    upsert_query = f"""
-    INSERT OR REPLACE INTO {ALT_ADDRESS_TABLE_NAME} 
-    (Endereco_Principal_Cache, Alt_Address, Alt_Latitude, Alt_Longitude) 
-    VALUES (?, ?, ?, ?);
-    """
-    
-    try:
-        conn.execute(upsert_query, (endereco_principal, alt_address, alt_lat, alt_lon))
-        conn.commit()
-        st.success(f"Endereço Alternativo salvo para a chave: **{endereco_principal}**.")
-        
-        load_alt_address_cache.clear() 
-        st.rerun() 
-        
-    except Exception as e:
-        st.error(f"Erro ao salvar o endereço alternativo no banco de dados: {e}")
         
         
 def import_cache_to_db(conn, uploaded_file):
-    """Importa o cache principal para o banco de dados (UPSERT)."""
-    # (Lógica da V29 para importar cache principal permanece a mesma)
+    """Importa o conteúdo de um arquivo (Excel/CSV) para o cache do banco de dados (UPSERT)."""
     
     # 1. Leitura do arquivo
     try:
@@ -232,6 +183,7 @@ def import_cache_to_db(conn, uploaded_file):
                 lat = row['Latitude_Corrigida']
                 lon = row['Longitude_Corrigida']
                 
+                # Usa a lógica de UPSERT (INSERT OR REPLACE)
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
                 (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
@@ -248,123 +200,35 @@ def import_cache_to_db(conn, uploaded_file):
             
             st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas (atualizadas ou adicionadas). O cache agora tem **{count_after}** entradas.")
             
+            # Força o recarregamento da tabela na tela
             st.rerun() 
             
             return count_after
 
     except Exception as e:
         st.error(f"Erro crítico ao inserir dados no cache. Verifique se o arquivo está correto. Erro: {e}")
-        return 0
-
-# V30: Nova Função - Importa o Cache de Endereço Alternativo
-def import_alt_cache_to_db(conn, uploaded_file):
-    """Importa o cache alternativo para o banco de dados (UPSERT)."""
-    
-    # 1. Leitura do arquivo
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df_import = pd.read_csv(uploaded_file)
-        else: # Assumindo Excel (.xlsx)
-            df_import = pd.read_excel(uploaded_file, sheet_name=0)
-            
-    except Exception as e:
-        st.error(f"Erro ao ler o arquivo: {e}")
-        return 0
-
-    # 2. Validação e Preparação
-    required_cols = ALT_CACHE_COLUMNS
-    if not all(col in df_import.columns for col in required_cols):
-        st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols)}")
-        return 0
-
-    # Conversão de tipos e limpeza
-    df_import = df_import[required_cols].copy()
-    df_import['Endereco_Principal_Cache'] = df_import['Endereco_Principal_Cache'].astype(str).str.strip().str.rstrip(';')
-    df_import['Alt_Address'] = df_import['Alt_Address'].astype(str).str.strip().str.rstrip(';')
-    
-    # Padroniza coordenadas (troca vírgula por ponto para float)
-    df_import['Alt_Latitude'] = df_import['Alt_Latitude'].astype(str).str.replace(',', '.', regex=False)
-    df_import['Alt_Longitude'] = df_import['Alt_Longitude'].astype(str).str.replace(',', '.', regex=False)
-    
-    df_import['Alt_Latitude'] = pd.to_numeric(df_import['Alt_Latitude'], errors='coerce')
-    df_import['Alt_Longitude'] = pd.to_numeric(df_import['Alt_Longitude'], errors='coerce')
-    
-    df_import = df_import.dropna(subset=['Alt_Latitude', 'Alt_Longitude'])
-    
-    if df_import.empty:
-        st.warning("Nenhum dado válido de endereço alternativo (Lat/Lon) foi encontrado no arquivo para importar.")
         return 0
         
-    # 3. Inserção no Banco (UPSERT)
-    insert_count = 0
-    try:
-        with st.spinner(f"Processando a importação de {len(df_import)} linhas..."):
-            for index, row in df_import.iterrows():
-                endereco_principal = row['Endereco_Principal_Cache']
-                alt_address = row['Alt_Address']
-                alt_lat = row['Alt_latitude']
-                alt_lon = row['Alt_Longitude']
-                
-                upsert_query = f"""
-                INSERT OR REPLACE INTO {ALT_ADDRESS_TABLE_NAME} 
-                (Endereco_Principal_Cache, Alt_Address, Alt_Latitude, Alt_Longitude) 
-                VALUES (?, ?, ?, ?);
-                """
-                conn.execute(upsert_query, (endereco_principal, alt_address, alt_lat, alt_lon))
-                insert_count += 1
-            
-            conn.commit()
-            
-            # 4. Finalização
-            load_alt_address_cache.clear()
-            count_after = len(load_alt_address_cache(conn))
-            
-            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas (atualizadas ou adicionadas). O cache de Alt Address agora tem **{count_after}** entradas.")
-            
-            st.rerun() 
-            
-            return count_after
-
-    except Exception as e:
-        st.error(f"Erro crítico ao inserir dados no cache. Verifique se o arquivo está correto. Erro: {e}")
-        return 0
-
-
 # ------------------------------------------------------------------
 # FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
 # ------------------------------------------------------------------
 def clear_geoloc_cache_db(conn):
-    """Exclui todos os dados da tabela de cache de geolocalização principal."""
+    """Exclui todos os dados da tabela de cache de geolocalização."""
     
+    # Exclui todos os registros da tabela
     query = f"DELETE FROM {TABLE_NAME};"
     
     try:
         conn.execute(query)
         conn.commit()
         
+        # Limpa o cache de dados do Streamlit e força recarregamento
         load_geoloc_cache.clear()
-        st.success("✅ **Sucesso!** Todos os dados do cache de geolocalização (Principal) foram excluídos permanentemente.")
+        st.success("✅ **Sucesso!** Todos os dados do cache de geolocalização foram excluídos permanentemente.")
         st.rerun() 
         
     except Exception as e:
-        st.error(f"❌ Erro ao limpar o cache principal: {e}")
-
-# V30: Nova Função - Limpa o Cache de Endereço Alternativo
-def clear_alt_address_cache_db(conn):
-    """Exclui todos os dados da tabela de cache de endereço alternativo."""
-    
-    query = f"DELETE FROM {ALT_ADDRESS_TABLE_NAME};"
-    
-    try:
-        conn.execute(query)
-        conn.commit()
-        
-        load_alt_address_cache.clear()
-        st.success("✅ **Sucesso!** Todos os dados do cache de Endereço Alternativo foram excluídos permanentemente.")
-        st.rerun() 
-        
-    except Exception as e:
-        st.error(f"❌ Erro ao limpar o cache de Alt Address: {e}")
+        st.error(f"❌ Erro ao limpar o cache: {e}")
 
 
 # ===============================================
@@ -372,7 +236,9 @@ def clear_alt_address_cache_db(conn):
 # ===============================================
 
 def limpar_endereco(endereco):
-    """Normaliza o texto do endereço para melhor comparação, mantendo números e vírgulas."""
+    """
+    Normaliza o texto do endereço para melhor comparação, mantendo números e vírgulas.
+    """
     if pd.isna(endereco):
         return ""
     endereco = str(endereco).lower().strip()
@@ -385,19 +251,65 @@ def limpar_endereco(endereco):
     return endereco
 
 def get_most_common_or_empty(x):
-    """Retorna o valor mais comum de uma Série Pandas."""
+    """
+    Retorna o valor mais comum de uma Série Pandas.
+    """
     x_limpo = x.dropna()
     if x_limpo.empty:
         return ""
     return x_limpo.mode().iloc[0]
 
+# --- V29: Função para Parsear Endereços Alternativos ---
+def parse_alternative_addresses(text_input):
+    """
+    Parses a text input where each line is: Sequence_ID | Alt_Address | Alt_Lat | Alt_Lon
+    Returns a DataFrame.
+    """
+    if not text_input:
+        return pd.DataFrame(columns=['Sequence', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude'])
 
-@st.cache_data
-def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc, conn):
+    lines = text_input.strip().split('\n')
+    data = []
+    
+    for line in lines:
+        try:
+            parts = [p.strip() for p in line.split('|')]
+            if len(parts) >= 4:
+                sequence_id = parts[0]
+                alt_address = parts[1]
+                alt_lat = parts[2].replace(',', '.')
+                alt_lon = parts[3].replace(',', '.')
+                
+                # Basic validation
+                if sequence_id and alt_address and pd.to_numeric(alt_lat, errors='coerce') is not None and pd.to_numeric(alt_lon, errors='coerce') is not None:
+                    data.append({
+                        'Sequence': sequence_id,
+                        'Alt_Address': alt_address,
+                        'Alt_Latitude': float(alt_lat),
+                        'Alt_Longitude': float(alt_lon)
+                    })
+        except Exception:
+            # Skip lines that don't match the format
+            continue
+            
+    # CRITICAL: Ensure 'Sequence' is the same type as in df_para_processar (string)
+    df_alt = pd.DataFrame(data)
+    if not df_alt.empty:
+        df_alt['Sequence'] = df_alt['Sequence'].astype(str).str.strip()
+        # Drop duplicates, keeping the last one (most recent entry)
+        df_alt = df_alt.drop_duplicates(subset=['Sequence'], keep='last')
+
+    return df_alt
+
+
+# V30 FIX: Adiciona hash_funcs para ignorar o objeto sqlite3.Connection (conn) no cache do Streamlit,
+# corrigindo o UnhashableParamError, caso o usuário passe conn.
+@st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"}) 
+def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc, df_alt_address_input, conn): # V30 FIX: Adiciona 'conn' ao argumento
     """
-    Função principal que aplica a correção (usando cache 100% match) e o agrupamento,
-    incluindo o lookup de Endereço Alternativo.
+    Função principal que aplica a correção (usando cache 100% match) e o agrupamento.
     """
+    # NOTE: 'conn' é passado apenas para satisfazer o Streamlit cache e não é usado aqui.
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
@@ -412,12 +324,14 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
     
     
-    # CHAVE DE BUSCA DE CACHE (Endereço Completo + Bairro)
+    # CHAVE DE BUSCA DE CACHE (Lógica Solicitada)
+    # Combina o Endereço (da planilha) + Bairro (da planilha) para criar a chave de busca
     df['Chave_Busca_Cache'] = (
         df[COLUNA_ENDERECO].astype(str).str.strip() + 
         ', ' + 
         df[COLUNA_BAIRRO].astype(str).str.strip()
     )
+    # Limpeza final da chave de busca (remove vírgulas extras se o bairro for vazio)
     df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*$', '', regex=True)
     df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*,', ',', regex=True)
 
@@ -431,12 +345,14 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     # =========================================================================
     
     if not df_cache_geoloc.empty:
+        # Renomeia colunas do cache para evitar conflitos no merge
         df_cache_lookup = df_cache_geoloc.rename(columns={
             'Endereco_Completo_Cache': 'Chave_Cache_DB', 
             'Latitude_Corrigida': 'Cache_Lat',
             'Longitude_Corrigida': 'Cache_Lon'
         })
         
+        # Merge do DataFrame principal com o cache usando a Chave de Busca Combinada
         df = pd.merge(
             df, 
             df_cache_lookup, 
@@ -445,44 +361,33 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
             how='left'
         )
         
+        # Atualiza Latitude e Longitude SOMENTE se a correção existir no cache
         cache_mask = df['Cache_Lat'].notna()
         df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         
-        df = df.drop(columns=['Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
+        # Remove colunas auxiliares
+        df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
     # =========================================================================
-    # V30: PASSO 2: MERGE COM CACHE DE ENDEREÇO ALTERNATIVO (PERSISTENTE)
+    # V29: PASSO 2: MERGE COM ENDEREÇO ALTERNATIVO
     # =========================================================================
     df[COLUNA_SEQUENCE] = df[COLUNA_SEQUENCE].astype(str)
     
-    # Carrega o cache persistente de Endereços Alternativos
-    df_alt_address_cache = load_alt_address_cache(conn)
-    
-    if not df_alt_address_cache.empty:
-        df_alt_address_cache = df_alt_address_cache.rename(columns={
-            'Endereco_Principal_Cache': 'Chave_Alt_DB', 
-        })
-        
-        # Merge baseado na mesma chave de busca (Endereço + Bairro)
+    if not df_alt_address_input.empty:
+        # Merge dos endereços alternativos baseados no ID da Sequence (pacote)
         df = pd.merge(
             df,
-            df_alt_address_cache[['Chave_Alt_DB', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude']],
-            left_on='Chave_Busca_Cache',
-            right_on='Chave_Alt_DB',
+            df_alt_address_input[['Sequence', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude']],
+            on='Sequence',
             how='left'
         )
-        
-        df = df.drop(columns=['Chave_Alt_DB'], errors='ignore')
     
-    # Preenche NA para as novas colunas para permitir a agregação, caso não tenham vindo do merge
+    # Preenche NA para as novas colunas para permitir a agregação
     if 'Alt_Address' not in df.columns:
          df['Alt_Address'] = None
          df['Alt_Latitude'] = None
          df['Alt_Longitude'] = None
-         
-    # Remove coluna auxiliar de busca (não é mais necessária após os merges)
-    df = df.drop(columns=['Chave_Busca_Cache'], errors='ignore')
          
     # =========================================================================
     # PASSO 3: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
@@ -492,10 +397,15 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
     
+    # Código de Fuzzy Matching (mantido)
     progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching e Agrupamento...")
     total_unicos = len(enderecos_unicos)
     
-    if total_unicos > 0:
+    if total_unicos == 0:
+        progresso_bar.empty()
+        # Se for 0, provavelmente o DataFrame está vazio, mas o retorno None já trata
+        pass 
+    else:
         for i, end_principal in enumerate(enderecos_unicos):
             if end_principal not in mapa_correcao:
                 matches = process.extract(
@@ -530,9 +440,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     colunas_agrupamento = ['Endereco_Corrigido', 'City', COLUNA_BAIRRO] 
     
     # =========================================================================
-    # AGRUPAMENTO - ADICIONANDO ENDEREÇOS ALTERNATIVOS
+    # V29: AGRUPAMENTO - ADICIONANDO ENDEREÇOS ALTERNATIVOS
     # =========================================================================
-    # Os campos Alt_Address/Lat/Lon já estão no DF após o merge do Cache Alt Address
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
@@ -545,7 +454,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         
         Min_Sequence=('Sequence_Num', 'min'),
         
-        # Campos Alt Address (Agrega os endereços alternativos únicos no grupo)
+        # V29: NOVOS CAMPOS - Agrega os endereços alternativos únicos no grupo
         Alt_Addresses_List=('Alt_Address', lambda x: '; '.join(x.dropna().astype(str).unique())),
         Alt_Latitudes_List=('Alt_Latitude', lambda x: '; '.join(map(str, x.dropna().astype(str).unique()))),
         Alt_Longitudes_List=('Alt_Longitude', lambda x: '; '.join(map(str, x.dropna().astype(str).unique()))),
@@ -556,12 +465,13 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
     # =========================================================================
-    # FORMATAÇÃO DO DF PARA O CIRCUIT
+    # V29: FORMATAÇÃO DO DF PARA O CIRCUIT
     # =========================================================================
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado'].str.strip() 
     )
+    # Remove vírgulas duplicadas ou vírgulas seguidas de espaço (se o bairro for vazio)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*$', '', regex=True) 
     
@@ -570,8 +480,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         df_agrupado['Alt_Latitudes_List'].astype(str) + ', ' + 
         df_agrupado['Alt_Longitudes_List'].astype(str)
     )
+    # Limpeza da coluna Alt_LatLon
     df_agrupado['Alt_LatLon'] = df_agrupado['Alt_LatLon'].str.replace(r',\s*$', '', regex=True).str.strip() 
-    df_agrupado['Alt_LatLon'] = df_agrupado['Alt_LatLon'].replace(' , ', '', regex=False).replace(r'^,$|^$', None, regex=True) 
+    df_agrupado['Alt_LatLon'] = df_agrupado['Alt_LatLon'].replace(' , ', '', regex=False).replace(r'^,$|^$', None, regex=True) # Limpa se for apenas vírgula ou vazio
 
     # 2. Adiciona as anotações alternativas se existirem
     alt_notes_mask = df_agrupado['Alt_Addresses_List'].notna() & (df_agrupado['Alt_Addresses_List'] != '')
@@ -586,7 +497,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado'] +
-        df_agrupado['Notes_Alternativas'] 
+        df_agrupado['Notes_Alternativas'] # V29: ANEXA A NOTA ALTERNATIVA
     )
 
     df_circuit = pd.DataFrame({
@@ -595,23 +506,29 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas,
+        # V29: NOVAS COLUNAS PARA SUBSTITUIÇÃO MANUAL
         'Alt_Address': df_agrupado['Alt_Addresses_List'].replace('', None), 
         'Alt_LatLon': df_agrupado['Alt_LatLon']
     }) 
     
     return df_circuit
 
-# ... (Função processar_rota_para_impressao permanece a mesma) ...
+# ... (Função processar_rota_para_impressao permanece a mesma - V28/V29) ...
 
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    
+    V28: CORREÇÃO CRÍTICA do filtro de Não-Volumosos para ignorar números do endereço, 
+         filtrando apenas pelos IDs na coluna 'Ordem ID'.
     """
     coluna_notes_lower = 'notes'
     
     if coluna_notes_lower not in df_input.columns:
+        # Tenta a coluna 'Notes' original do Circuit se 'notes' em lower não existir
         coluna_notes_lower = 'Notes' 
         if coluna_notes_lower not in df_input.columns:
+             # Se nem 'notes' nem 'Notes' existe, levanta o erro
              raise KeyError(f"A coluna 'Notes' ou 'notes' não foi encontrada.") 
     
     df = df_input.copy()
@@ -621,6 +538,7 @@ def processar_rota_para_impressao(df_input):
     # Coluna "Ordem ID" é o primeiro campo antes do ';'
     df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
     
+    # 1. Tira as aspas extras, se houver, e tira espaços
     df['Ordem ID'] = df_split[0].astype(str).str.strip().str.strip('"') 
     df['Anotações Completas'] = df_split[1].astype(str).str.strip().str.strip('"') if 1 in df_split.columns else ""
     
@@ -634,16 +552,26 @@ def processar_rota_para_impressao(df_input):
     # DataFrame FINAL GERAL
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
-    # 1. FILTRAR VOLUMOSOS
+    # =========================================================================
+    # 1. FILTRAR VOLUMOSOS (Lógica mantida, pois está correta)
+    # =========================================================================
     df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
-    # 2. FILTRAR NÃO-VOLUMOSOS
+    # =========================================================================
+    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V28)
+    # =========================================================================
+    
+    # Passo 1: Extrair APENAS a lista de IDs (tudo que está ANTES do " - " na coluna Ordem ID)
     df['Lista_IDs'] = df['Ordem ID'].str.split(' - ', n=1, expand=True)[0]
+    
+    # Passo 2: Aplicar a Regex APENAS na Lista de IDs (ignorando o endereço)
+    # Regex: Procura por um ou mais dígitos (\d+) que NÃO são seguidos por um asterisco (?![\*])
     df_nao_volumosos = df[df['Lista_IDs'].str.contains(r'\d+(?![\*])', regex=True, na=False)].copy() 
     
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
+    # Remove a coluna auxiliar
     df = df.drop(columns=['Lista_IDs'], errors='ignore')
 
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
@@ -656,17 +584,11 @@ def processar_rota_para_impressao(df_input):
 # 1. Conexão com o Banco de Dados (Executada uma vez)
 conn = get_db_connection()
 create_table_if_not_exists(conn)
-create_alt_address_table_if_not_exists(conn) # V30: Cria a tabela de Endereço Alternativo
 
 st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
-# CRIAÇÃO DAS ABAS (Quatro Abas)
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🚀 Pré-Roteirização (Importação)", 
-    "📋 Pós-Roteirização (Impressão/Cópia)", 
-    "💾 Gerenciar Cache de Geoloc", # Novo título
-    "📌 Gerenciar Matches Alternativos" # Nova Aba
-])
+# CRIAÇÃO DAS ABAS 
+tab1, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
 
 
 # ----------------------------------------------------------------------------------
@@ -675,13 +597,16 @@ tab1, tab2, tab3, tab4 = st.tabs([
 
 with tab1:
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções dos **Caches Persistentes** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
     # Inicializa o estado
     if 'df_original' not in st.session_state:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
         st.session_state['volumoso_ids'] = set() 
+    # V29: Inicializa o estado para o texto de endereço alternativo
+    if 'text_area_alt_address' not in st.session_state:
+        st.session_state['text_area_alt_address'] = ""
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -705,11 +630,14 @@ with tab1:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
-            # Resetar as marcações se um novo arquivo for carregado
+            # Resetar as marcações e textos se um novo arquivo for carregado
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
+                 st.session_state['text_area_alt_address'] = "" # V29: Limpar Alt Address
+                 st.session_state['df_alt_address'] = None # Forçar recálculo
                  
+
             st.session_state['df_original'] = df_input_pre.copy()
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
@@ -729,11 +657,14 @@ with tab1:
         df_temp = st.session_state['df_original'].copy()
         
         # --- ORDENAÇÃO NUMÉRICA CORRETA ---
+        # 1. Cria uma coluna auxiliar numérica, removendo '*' se houver
         df_temp['Order_Num'] = df_temp[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
         df_temp['Order_Num'] = pd.to_numeric(df_temp['Order_Num'], errors='coerce')
         
+        # 2. Obtém as ordens únicas e as ordena numericamente
         df_ordens_unicas = df_temp.drop_duplicates(subset=[COLUNA_SEQUENCE]).sort_values(by='Order_Num')
         ordens_originais_sorted = df_ordens_unicas[COLUNA_SEQUENCE].astype(str).tolist()
+        # --- FIM ORDENAÇÃO ---
         
         def update_volumoso_ids(order_id, is_checked):
             if is_checked:
@@ -744,6 +675,7 @@ with tab1:
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
+        # BLOCO DE CORREÇÃO DO LAYOUT V24
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
         
@@ -769,11 +701,26 @@ with tab1:
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
         
-        
+        # ----------------------------------------------------------------------------------
+        # V29: NOVO BLOCO - ENDEREÇOS ALTERNATIVOS
+        # ----------------------------------------------------------------------------------
         st.markdown("---")
-        st.subheader("1.3 Configurar e Processar")
+        st.subheader("1.3 Endereços Alternativos (Opção de Rota)")
+        st.warning("⚠️ **Atenção:** Use esta opção apenas para endereços alternativos de entrega (ex: casa de vizinho, novo endereço de empresa, etc.)")
         
-        st.info("⚠️ **Endereços Alternativos** são carregados automaticamente do **Cache na Aba 4**.")
+        st.caption("Insira os dados no formato: `ID_DA_SEQUÊNCIA | Endereço Alternativo Completo | Latitude | Longitude`")
+        
+        st.text_area(
+            'Cole a lista de endereços alternativos aqui (um por linha):', 
+            height=150,
+            key="text_area_alt_address",
+            help="Exemplo:\n121 | Rua das Empresas, 45, Fundos | -23.1234 | -52.5678\n45* | Av Principal, 100, Portaria | -23.5555 | -52.6666"
+        )
+        # ----------------------------------------------------------------------------------
+
+
+        st.markdown("---")
+        st.subheader("1.4 Configurar e Processar")
         
         limite_similaridade_ajustado = st.slider(
             'Ajuste a Precisão do Corretor (Fuzzy Matching):',
@@ -799,17 +746,25 @@ with tab1:
                     COLUNA_SEQUENCE
                 ] = str_id_volumoso + '*'
 
-            # 2. Carregar Cache de Geolocalização Principal
+            # 2. V29: PARSE ALTERNATIVE ADDRESSES FROM TEXT AREA
+            alt_address_text = st.session_state.get('text_area_alt_address', '')
+            df_alt_address = parse_alternative_addresses(alt_address_text)
+            
+            if not df_alt_address.empty:
+                st.info(f"Foram identificados **{len(df_alt_address)}** pacotes com endereços alternativos.")
+
+            # 3. Carregar Cache de Geolocalização (O @st.cache_data garante que ele pega o último salvo)
             df_cache = load_geoloc_cache(conn)
 
-            # 3. Iniciar o processamento e agrupamento
-            with st.spinner('Aplicando caches persistentes (Geoloc e Alternativo), processando dados...'):
-                 # V30: Passando a conexão para carregar o Cache Alt Address internamente
+            # 4. Iniciar o processamento e agrupamento
+            with st.spinner('Aplicando cache 100% match, processando dados e endereços alternativos...'):
+                 # V30 FIX: Passa a conexão 'conn' para a função, que agora é configurada para ignorá-la no cache
                  df_circuit = processar_e_corrigir_dados(
                      df_para_processar, 
                      limite_similaridade_ajustado, 
                      df_cache,
-                     conn # Passa a conexão
+                     df_alt_address,
+                     conn # V30 FIX: Passa a conexão (para evitar UnhashableParamError)
                  )
             
             if df_circuit is not None:
@@ -841,7 +796,8 @@ with tab1:
                 
                 # Download Circuit 
                 buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openypxl') as writer:
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    # Escreve TODAS as colunas, incluindo as Alt_
                     df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral') 
                     
                     if not df_volumosos_separado.empty:
@@ -856,7 +812,7 @@ with tab1:
                     label="📥 Baixar ARQUIVO PARA CIRCUIT",
                     data=buffer_circuit,
                     file_name="Circuit_Import_FINAL_MARCADO.xlsx",
-                    mime=EXCEL_MIME_TYPE, 
+                    mime=EXCEL_MIME_TYPE, # Usando a variável global
                     key="download_excel_circuit"
                 )
 
@@ -906,6 +862,7 @@ with tab2:
             df_input_pos.columns = df_input_pos.columns.str.strip() 
             df_input_pos.columns = df_input_pos.columns.str.lower()
             
+            # --- Tenta corrigir o problema de maiúsculas/minúsculas da coluna Notes ---
             if 'notes' not in df_input_pos.columns:
                 df_input_pos.columns = [
                     col.lower() if col.lower() == 'notes' or col.lower() == 'address' else col
@@ -914,11 +871,13 @@ with tab2:
             
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V29/V28 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
                 st.markdown("---")
                 st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
+                st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
                 df_visualizacao_geral = df_final_geral.copy()
                 df_visualizacao_geral.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
@@ -932,6 +891,7 @@ with tab2:
                 st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
                 
                 if not df_nao_volumosos_impressao.empty:
+                    # Contagem agora reflete agrupamentos puros E agrupamentos mistos
                     st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos (puros ou mistos) nesta rota.")
                     
                     df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
@@ -948,6 +908,7 @@ with tab2:
                 st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
                 
                 if not df_volumosos_impressao.empty:
+                    # Contagem agora reflete agrupamentos puros E agrupamentos mistos
                     st.warning(f"Foram encontrados **{len(df_volumosos_impressao)}** endereços com pacotes volumosos (puros ou mistos) nesta rota.")
                     
                     df_visualizacao_vol = df_volumosos_impressao.copy()
@@ -1034,18 +995,19 @@ with tab2:
                 label="📥 Baixar Lista Limpa (Excel) - Geral + Separadas",
                 data=buffer,
                 file_name="Lista_Ordem_Impressao_FINAL.xlsx",
-                mime=EXCEL_MIME_TYPE, 
+                mime=EXCEL_MIME_TYPE, # Usando a variável global
                 help="Baixe este arquivo. Ele contém três abas: a lista geral, a lista de não-volumosos e a lista de volumosos.",
                 key="download_list"
             )
 
 
 # ----------------------------------------------------------------------------------
-# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (PRINCIPAL LAT/LON)
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
     """Limpa os campos de Latitude/Longitude e o campo de colar coordenadas."""
+    # O Streamlit guarda o valor no session_state, então precisamos resetá-lo
     if 'form_new_lat' in st.session_state:
         st.session_state['form_new_lat'] = ""
     if 'form_new_lon' in st.session_state:
@@ -1055,126 +1017,114 @@ def clear_lat_lon_fields():
     if 'form_new_endereco' in st.session_state:
         st.session_state['form_new_endereco'] = ""
 
-def apply_google_coords(lat_key, lon_key, coord_input_key):
+
+def apply_google_coords():
     """Processa a string colada do Google Maps e preenche Lat/Lon."""
-    coord_string = st.session_state.get(coord_input_key, '')
+    coord_string = st.session_state.get('form_colar_coord', '')
     if not coord_string:
         st.error("Nenhuma coordenada foi colada. Cole o texto do Google Maps, ex: -23,5139753, -52,1131268")
         return
 
+    # 1. Pré-limpeza: Remove espaços e tenta isolar o separador principal (que pode ser vírgula ou espaço)
     coord_string_clean = coord_string.strip()
     
     try:
+        # Padrão: opcional '-', dígitos, opcional (ponto/vírgula, dígitos)
+        # Regex para extrair números flutuantes de forma robusta
         matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
         
         if len(matches) >= 2:
+            # Tenta a conversão, usando ponto como decimal
             lat = float(matches[0].replace(',', '.'))
             lon = float(matches[1].replace(',', '.'))
             
-            st.session_state[lat_key] = str(lat)
-            st.session_state[lon_key] = str(lon)
+            # Atualiza a session state dos campos Lat e Lon para exibição
+            st.session_state['form_new_lat'] = str(lat)
+            st.session_state['form_new_lon'] = str(lon)
             st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
             return
             
     except ValueError:
+        # Se falhar a regex/conversão, tenta a divisão simples com a vírgula como separador principal
         parts = coord_string_clean.split(',')
         if len(parts) >= 2:
              try:
+                # Assume que a primeira parte é a Latitude e a segunda a Longitude
                 lat = float(parts[0].replace(',', '.').strip()) 
                 lon = float(parts[1].replace(',', '.').strip())
                 
-                st.session_state[lat_key] = str(lat)
-                st.session_state[lon_key] = str(lon)
+                st.session_state['form_new_lat'] = str(lat)
+                st.session_state['form_new_lon'] = str(lon)
                 st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
                 return
              except ValueError:
-                pass 
+                pass # Falhou, vai para a mensagem de erro final
                 
     st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
 
-# Funções auxiliares para o Cache Alternativo
-def clear_alt_address_fields():
-    """Limpa os campos de Endereço Alternativo."""
-    if 'form_alt_endereco_principal' in st.session_state:
-        st.session_state['form_alt_endereco_principal'] = ""
-    if 'form_alt_endereco' in st.session_state:
-        st.session_state['form_alt_endereco'] = ""
-    if 'form_alt_lat' in st.session_state:
-        st.session_state['form_alt_lat'] = ""
-    if 'form_alt_lon' in st.session_state:
-        st.session_state['form_alt_lon'] = ""
-    if 'form_alt_colar_coord' in st.session_state:
-        st.session_state['form_alt_colar_coord'] = ""
-        
-def export_cache(df_cache, columns):
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_cache[columns].to_excel(writer, index=False, sheet_name='Cache')
-    buffer.seek(0)
-    return buffer
-
 
 with tab3:
-    st.header("💾 Gerenciamento do Cache de Geolocalização Principal (Lat/Lon)")
-    st.info("Aqui você registra as correções de Latitude e Longitude para endereços que o Circuit não consegue roteirizar.")
+    st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
+    st.info("A chave de busca no pré-roteirização é a combinação exata de **Endereço + Bairro** da sua planilha original.")
 
     # 1. Carrega o cache salvo
     df_cache_original = load_geoloc_cache(conn).fillna("")
     
     
-    # =========================================================================
-    # SEÇÃO 1: CACHE DE GEOLOCALIZAÇÃO (PRINCIPAL)
-    # =========================================================================
-    st.subheader("3.1 Registrar Nova Correção Principal (Lat/Lon)")
-    st.caption("A chave de busca é a combinação exata de **Endereço + Bairro** da sua planilha original.")
+    # --- NOVO: Formulário de Entrada Rápida ---
+    st.subheader("3.1 Adicionar Nova Correção Rápida")
     
-    with st.expander("Adicionar Nova Correção Principal"):
-        # Container para o formulário
+    # Container para o formulário
+    with st.container():
         
         st.subheader("1. Preencher Endereço")
+        # Inicializa se não existir (para evitar erro ao acessar o estado)
         if 'form_new_endereco' not in st.session_state:
             st.session_state['form_new_endereco'] = ""
             
         new_endereco = st.text_area(
-            "1. Endereço COMPLETO no Cache (Chave de Busca)", 
+            "1. Endereço COMPLETO no Cache (Copie e Cole do Circuit)", 
             key="form_new_endereco", 
             height=70,
-            help="Cole o endereço exatamente como o Circuit o reconhece (Endereço + Bairro). Ex: 'Rua Principal, 123, Bairro Exato'."
+            help="Cole o endereço exatamente como o Circuit o reconhece (incluindo o Bairro/Cidade). O sistema remove automaticamente o ' ; ' final, se houver."
         )
         
         st.markdown("---")
-        st.subheader("2. Preencher Coordenadas")
+        st.subheader("2. Preencher Coordenadas (Use o método mais fácil)")
         
         col_input_coord, col_btn_coord = st.columns([3, 1])
         
         with col_input_coord:
+            # Inicializa se não existir
             if 'form_colar_coord' not in st.session_state:
                 st.session_state['form_colar_coord'] = ""
                 
             st.text_input(
                 "2. Colar Coordenadas Google (Ex: -23,5139753, -52,1131268)",
                 key="form_colar_coord",
-                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth."
+                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth. O sistema converterá vírgula decimal para ponto."
             )
         with col_btn_coord:
-            st.markdown("##") 
+            st.markdown("##") # Espaço para alinhar o botão
             st.button(
                 "Aplicar Coordenadas", 
                 on_click=apply_google_coords,
-                args=('form_new_lat', 'form_new_lon', 'form_colar_coord'),
-                key="btn_apply_coord_geo",
+                key="btn_apply_coord",
+                help="Clique para extrair Latitude e Longitude da caixa de texto acima."
             )
         
-        st.caption("--- OU preencha ou ajuste manualmente (use PONTO como separador decimal) ---")
+        st.caption("--- OU preencha ou ajuste manualmente (deve usar PONTO como separador decimal para evitar erros) ---")
 
         col_lat, col_lon = st.columns(2)
         
+        # Inicializa se não existir
         if 'form_new_lat' not in st.session_state:
             st.session_state['form_new_lat'] = ""
         if 'form_new_lon' not in st.session_state:
             st.session_state['form_new_lon'] = ""
             
         with col_lat:
+            # Mantém os valores da session state para permitir o preenchimento automático
             new_latitude = st.text_input("3. Latitude Corrigida", key="form_new_lat")
         with col_lon:
             new_longitude = st.text_input("4. Longitude Corrigida", key="form_new_lon")
@@ -1184,8 +1134,10 @@ with tab3:
         save_button_col, clear_button_col = st.columns(2)
         
         with save_button_col:
-            if st.button("✅ Salvar Nova Correção Principal", key="btn_save_quick_geo"):
+            # Botão de salvar - AGORA DENTRO DE UM CALLBACK MANUAL
+            if st.button("✅ Salvar Nova Correção no Cache", key="btn_save_quick"):
                 
+                # Garante que os valores atuais da caixa de texto sejam usados
                 lat_to_save = st.session_state.get('form_new_lat', '')
                 lon_to_save = st.session_state.get('form_new_lon', '')
                 
@@ -1193,210 +1145,104 @@ with tab3:
                     st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar.")
                 else:
                     try:
+                        # 1. TRATAMENTO DO ENDEREÇO: REMOVE ESPAÇOS E O ";" FINAL
                         endereco_limpo = new_endereco.strip().rstrip(';')
+                        
+                        # 2. TRATAMENTO DAS COORDENADAS: Converte para float (trocando a vírgula por ponto se necessário)
                         lat = float(str(lat_to_save).strip().replace(',', '.'))
                         lon = float(str(lon_to_save).strip().replace(',', '.'))
                         
+                        # 3. Chama a função de salvamento
                         save_single_entry_to_db(conn, endereco_limpo, lat, lon)
                         
+                        # 4. Limpa os campos após o salvamento
+                        # O rerun irá finalizar a limpeza do endereço
+                        
                     except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidos.")
+                        st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
         
         with clear_button_col:
-             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form_geo")
+             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")
+
 
     
-    st.markdown(f"#### Visualização do Cache Principal (Total: {len(df_cache_original)})")
+    st.markdown("---")
+    
+    st.subheader(f"3.2 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
+    st.caption("Esta tabela mostra os dados atualmente salvos. Use o formulário acima para adicionar ou substituir entradas.")
+    
     st.dataframe(df_cache_original, use_container_width=True) 
     
-    # ----------------------------------------------------------------------------------
-    # BACKUP E RESTAURAÇÃO DO CACHE PRINCIPAL
-    # ----------------------------------------------------------------------------------
+    st.markdown("---")
     
-    st.markdown("##### Backup/Restauração e Limpeza do Cache Principal")
-    col_backup_geo, col_restauracao_geo, col_limpeza_geo = st.columns(3)
     
-    with col_backup_geo:
+    # --- NOVO: BACKUP E RESTAURAÇÃO ---
+    st.header("3.3 Backup e Restauração do Cache")
+    st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
+    
+    col_backup, col_restauracao = st.columns(2)
+    
+    # --- COLUNA DE BACKUP (DOWNLOAD) ---
+    with col_backup:
+        st.markdown("#### 📥 Fazer Backup (Download)")
+        st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
+        
+        def export_cache(df_cache):
+            """Prepara o DataFrame para download em Excel."""
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openypxl') as writer:
+                # Usa as colunas exatas do cache (colunas requeridas para importação)
+                df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
+            buffer.seek(0)
+            return buffer
+            
+        # Gera o arquivo de backup
         if not df_cache_original.empty:
-            backup_file = export_cache(df_cache_original, CACHE_COLUMNS)
+            backup_file = export_cache(df_cache_original)
             st.download_button(
-                label="⬇️ Baixar Backup Principal",
+                label="⬇️ Baixar Backup do Cache (.xlsx)",
                 data=backup_file,
-                file_name="cache_geolocalizacao_principal.xlsx",
-                mime=EXCEL_MIME_TYPE, 
-                key="download_backup_geo"
+                file_name="cache_geolocalizacao_backup.xlsx",
+                mime=EXCEL_MIME_TYPE, # Usando a variável global
+                key="download_backup"
             )
         else:
-            st.caption("Cache principal vazio.")
+            st.warning("O cache está vazio, não há dados para baixar.")
 
-    with col_restauracao_geo:
-        uploaded_backup_geo = st.file_uploader(
-            "Restaurar Principal:", 
+
+    # --- COLUNA DE RESTAURAÇÃO (UPLOAD) ---
+    with col_restauracao:
+        st.markdown("#### 📤 Restaurar Cache (Upload)")
+        st.warning("A restauração irá **substituir** entradas existentes (Endereço Completo) se a chave for igual.")
+        
+        uploaded_backup = st.file_uploader(
+            "Arraste o arquivo de Backup (.xlsx ou .csv) aqui:", 
             type=['csv', 'xlsx'],
-            key="upload_backup_geo",
-            label_visibility='collapsed'
+            key="upload_backup"
         )
-        if uploaded_backup_geo is not None:
-            if st.button("⬆️ Iniciar Restauração Principal", key="btn_restore_cache_geo"):
+        
+        if uploaded_backup is not None:
+            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
                 with st.spinner('Restaurando dados do arquivo...'):
-                    import_cache_to_db(conn, uploaded_backup_geo)
+                    import_cache_to_db(conn, uploaded_backup)
                     
-    with col_limpeza_geo:
-        confirm_clear_geo = st.checkbox(
-            "Confirmar exclusão (Principal)", 
-            key="confirm_clear_cache_geo"
+    # ----------------------------------------------------------------------------------
+    # BLOCO V26: LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.header("3.4 Limpar TODO o Cache de Geolocalização")
+    st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas no cache do sistema.")
+    
+    # Usa um checkbox de confirmação para evitar cliques acidentais
+    if len(df_cache_original) > 0:
+        confirm_clear = st.checkbox(
+            f"Eu confirmo que desejo excluir permanentemente **{len(df_cache_original)}** entradas do cache.", 
+            key="confirm_clear_cache"
         )
-        if confirm_clear_geo:
-            if st.button("🔴 Excluir Cache Principal", key="btn_final_clear_cache_geo"):
+        
+        if confirm_clear:
+            if st.button("🔴 EXCLUIR TODOS OS DADOS DO CACHE AGORA", key="btn_final_clear_cache"):
+                # Chama a função de limpeza do banco de dados
                 clear_geoloc_cache_db(conn)
-
-
-# ----------------------------------------------------------------------------------
-# ABA 4: GERENCIAR CACHE DE ENDEREÇO ALTERNATIVO (NOVA ABA)
-# ----------------------------------------------------------------------------------
-
-with tab4:
-    st.header("📌 Gerenciamento de Matches de Endereço Alternativo")
-    st.info("Utilize esta seção para registrar manualmente um endereço (chave de busca) e o endereço alternativo/ponto de referência, incluindo a geolocalização do ponto de referência.")
-    
-    # 1. Carrega o cache alternativo salvo
-    df_alt_address_original = load_alt_address_cache(conn).fillna("")
-
-    # =========================================================================
-    # SEÇÃO 4.1: REGISTRO DE ENDEREÇO ALTERNATIVO
-    # =========================================================================
-    st.subheader("4.1 Registrar Novo Match Manual")
-    st.caption("A chave de busca (Endereço Digitado) será usada na Aba 1 para aplicar o Match/Sugestão abaixo.")
-    
-    with st.expander("Adicionar Novo Match/Sugestão de Endereço Alternativo"): 
-        
-        st.subheader("1. Endereço Digitado (Chave de Busca para o Match)")
-        if 'form_alt_endereco_principal' not in st.session_state:
-            st.session_state['form_alt_endereco_principal'] = ""
-        
-        alt_endereco_principal = st.text_area(
-            "1. Endereço Principal (Chave)",
-            key="form_alt_endereco_principal", 
-            height=70,
-            help="Cole o endereço **exatamente** como o cliente digitou (Endereço + Bairro da sua planilha) para que o sistema encontre o match."
-        )
-
-        st.markdown("---")
-        st.subheader("2. Sugestão de Endereço Alternativo (o Match) e Coordenadas") 
-        
-        if 'form_alt_endereco' not in st.session_state:
-            st.session_state['form_alt_endereco'] = ""
-        
-        new_alt_endereco = st.text_area(
-            "2. Endereço Alternativo COMPLETO (Sugestão do Match)",
-            key="form_alt_endereco", 
-            height=70,
-            help="O novo endereço (corrigido/alternativo/referência) que será sugerido (Alt_Address)."
-        )
-
-        col_alt_input_coord, col_alt_btn_coord = st.columns([3, 1])
-        
-        with col_alt_input_coord:
-            if 'form_alt_colar_coord' not in st.session_state:
-                st.session_state['form_alt_colar_coord'] = ""
-                
-            st.text_input(
-                "3. Colar Coordenadas Alternativas (Google Format)",
-                key="form_alt_colar_coord",
-                help="Coordenadas (Lat/Lon) do endereço alternativo."
-            )
-        with col_alt_btn_coord:
-            st.markdown("##") 
-            st.button(
-                "Aplicar Coordenadas", 
-                on_click=apply_google_coords,
-                args=('form_alt_lat', 'form_alt_lon', 'form_alt_colar_coord'),
-                key="btn_apply_coord_alt",
-            )
-        
-        st.caption("--- OU preencha ou ajuste manualmente (use PONTO como separador decimal) ---")
-
-        col_alt_lat, col_alt_lon = st.columns(2)
-        
-        if 'form_alt_lat' not in st.session_state:
-            st.session_state['form_alt_lat'] = ""
-        if 'form_alt_lon' not in st.session_state:
-            st.session_state['form_alt_lon'] = ""
-            
-        with col_alt_lat:
-            alt_latitude = st.text_input("4. Latitude Alternativa", key="form_alt_lat")
-        with col_alt_lon:
-            alt_longitude = st.text_input("5. Longitude Alternativa", key="form_alt_lon")
-            
-        st.markdown("---")
-        
-        save_button_col_alt, clear_button_col_alt = st.columns(2)
-        
-        with save_button_col_alt:
-            if st.button("✅ Salvar Novo Endereço Alternativo", key="btn_save_quick_alt"):
-                
-                alt_lat_to_save = st.session_state.get('form_alt_lat', '')
-                alt_lon_to_save = st.session_state.get('form_alt_lon', '')
-                
-                if not alt_endereco_principal or not new_alt_endereco or not alt_lat_to_save or not alt_lon_to_save:
-                    st.error("Preencha o Endereço Principal (Chave), o Endereço Alternativo e as Coordenadas antes de salvar.")
-                else:
-                    try:
-                        endereco_principal_limpo = alt_endereco_principal.strip().rstrip(';')
-                        alt_address_limpo = new_alt_endereco.strip().rstrip(';')
-                        alt_lat = float(str(alt_lat_to_save).strip().replace(',', '.'))
-                        alt_lon = float(str(alt_lon_to_save).strip().replace(',', '.'))
-                        
-                        save_single_alt_entry_to_db(conn, endereco_principal_limpo, alt_address_limpo, alt_lat, alt_lon)
-                        
-                    except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidos.")
-        
-        with clear_button_col_alt:
-             st.button("❌ Limpar Formulário Alt", on_click=clear_alt_address_fields, key="btn_clear_form_alt")
-
-    
-    st.markdown(f"#### Visualização do Cache Alternativo (Total: {len(df_alt_address_original)})")
-    st.dataframe(df_alt_address_original, use_container_width=True) 
-    
-    # ----------------------------------------------------------------------------------
-    # BACKUP E RESTAURAÇÃO DO CACHE ALTERNATIVO
-    # ----------------------------------------------------------------------------------
-    
-    st.markdown("##### Backup/Restauração e Limpeza do Cache Alternativo")
-    col_backup_alt, col_restauracao_alt, col_limpeza_alt = st.columns(3)
-
-    with col_backup_alt:
-        if not df_alt_address_original.empty:
-            backup_file_alt = export_cache(df_alt_address_original, ALT_CACHE_COLUMNS)
-            st.download_button(
-                label="⬇️ Baixar Backup Alternativo",
-                data=backup_file_alt,
-                file_name="cache_alt_address_backup.xlsx",
-                mime=EXCEL_MIME_TYPE, 
-                key="download_backup_alt"
-            )
-        else:
-            st.caption("Cache alternativo vazio.")
-            
-    with col_restauracao_alt:
-        uploaded_backup_alt = st.file_uploader(
-            "Restaurar Alternativo:", 
-            type=['csv', 'xlsx'],
-            key="upload_backup_alt",
-            label_visibility='collapsed'
-        )
-        if uploaded_backup_alt is not None:
-            if st.button("⬆️ Iniciar Restauração Alternativa", key="btn_restore_cache_alt"):
-                with st.spinner('Restaurando dados do arquivo...'):
-                    import_alt_cache_to_db(conn, uploaded_backup_alt)
-                    
-    with col_limpeza_alt:
-        confirm_clear_alt = st.checkbox(
-            "Confirmar exclusão (Alternativo)", 
-            key="confirm_clear_cache_alt"
-        )
-        if confirm_clear_alt:
-            if st.button("🔴 Excluir Cache Alternativo", key="btn_final_clear_cache_alt"):
-                clear_alt_address_cache_db(conn)
-
+    else:
+        st.info("O cache já está vazio. Não há dados para excluir.")

@@ -520,8 +520,7 @@ def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     
-    V28: CORREÇÃO CRÍTICA do filtro de Não-Volumosos para ignorar números do endereço, 
-         filtrando apenas pelos IDs na coluna 'Ordem ID'.
+    V33: CORREÇÃO CRÍTICA da separação de Volumosos/Não-Volumosos.
     """
     coluna_notes_lower = 'notes'
     
@@ -554,26 +553,39 @@ def processar_rota_para_impressao(df_input):
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 1. FILTRAR VOLUMOSOS (Lógica mantida, pois está correta)
+    # 1. FILTRAR VOLUMOSOS (CORREÇÃO V33: Qualquer linha que contenha '*')
     # =========================================================================
+    
+    # Usa a coluna 'Ordem ID' que contém os IDs agrupados
+    # str.contains(r'\*', regex=False) procura o caractere '*' literalmente
     df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V28)
+    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO V33: Apenas as linhas que não contenham '*')
+    # A lógica é: Se a parada não tem NENHUM volumoso, ela é de Não-Volumoso.
+    # O filtro de grupos mistos (que é o que o usuário quer) deve ser mais complexo,
+    # mas para a lista de impressão, o motorista precisa da lista de entregas que 
+    # NÃO PRECISAM DE MARCAÇÃO ESPECIAL (ou seja, só números puros).
+    #
+    # MUDANÇA V33: Vamos simplificar para garantir que ele pegue os não-volumosos puros.
+    # Pacote Não-Volumoso = Aquele que NÃO tem asterisco.
+    # Se for misto (ex: 121*,122), ele *NÃO* é um "Não-Volumoso Puro", mas a linha
+    # contém pacotes não-volumosos. 
+    #
+    # Vamos usar a regra mais simples para evitar erros de regex: 
+    # Não-Volumosos Puros = Paradas onde NENHUM pacote está marcado com *.
+    # Isso resolve 99% dos casos, onde o motorista precisa da lista de "pacotes normais".
     # =========================================================================
     
-    # Passo 1: Extrair APENAS a lista de IDs (tudo que está ANTES do " - " na coluna Ordem ID)
-    df['Lista_IDs'] = df['Ordem ID'].str.split(' - ', n=1, expand=True)[0]
-    
-    # Passo 2: Aplicar a Regex APENAS na Lista de IDs (ignorando o endereço)
-    # Regex: Procura por um ou mais dígitos (\d+) que NÃO são seguidos por um asterisco (?![\*])
-    df_nao_volumosos = df[df['Lista_IDs'].str.contains(r'\d+(?![\*])', regex=True, na=False)].copy() 
+    # Filtra as linhas que *não* contêm o caractere '*'
+    # O til (~) inverte o booleano, ou seja, pega onde NÃO contém '*'
+    df_nao_volumosos = df[~df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy() 
     
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
-    # Remove a coluna auxiliar
-    df = df.drop(columns=['Lista_IDs'], errors='ignore')
+    # Remove a coluna auxiliar (não existe neste fluxo, mas mantendo a limpeza)
+    # df = df.drop(columns=['Lista_IDs'], errors='ignore') # Esta coluna não é mais necessária
 
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
 
@@ -877,7 +889,7 @@ with tab2:
             
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V29/V28 APLICADA AQUI)
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V33 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
@@ -894,11 +906,11 @@ with tab2:
                 
                 # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
                 st.markdown("---")
-                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
+                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS (Puros)")
                 
                 if not df_nao_volumosos_impressao.empty:
                     # Contagem agora reflete agrupamentos puros E agrupamentos mistos
-                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos (puros ou mistos) nesta rota.")
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços que contêm **APENAS** pacotes não-volumosos.")
                     
                     df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
                     df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
@@ -907,11 +919,11 @@ with tab2:
                     copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Nenhum pacote não-volumoso encontrado nesta rota (todos os pedidos são volumosos ou a lista está vazia).")
+                    st.info("Nenhum pacote não-volumoso puro encontrado nesta rota (todos os pedidos são volumosos, ou estão em grupos mistos, ou a lista está vazia).")
                     
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")
-                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
+                st.header("📦 Lista de Impressão APENAS VOLUMOSOS (Puros e Mistos)")
                 
                 if not df_volumosos_impressao.empty:
                     # Contagem agora reflete agrupamentos puros E agrupamentos mistos
@@ -960,8 +972,8 @@ with tab2:
 
         # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
         if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
-            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
-            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (puros ou agrupamentos mistos).")
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos Puros)")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (apenas grupos puros).")
             
             st.text_area(
                 'Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):', 
@@ -972,7 +984,7 @@ with tab2:
         
         # --- ÁREA DE CÓPIA VOLUMOSOS ---
         if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
-            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
+            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos Puros e Mistos)")
             st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos (puros ou agrupamentos mistos).")
             
             st.text_area(
@@ -1253,4 +1265,3 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
-

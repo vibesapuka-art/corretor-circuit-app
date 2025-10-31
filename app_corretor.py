@@ -302,7 +302,7 @@ def import_alt_cache_to_db(conn, uploaded_file):
             for index, row in df_import.iterrows():
                 endereco_principal = row['Endereco_Principal_Cache']
                 alt_address = row['Alt_Address']
-                alt_lat = row['Alt_Latitude']
+                alt_lat = row['Alt_latitude']
                 alt_lon = row['Alt_Longitude']
                 
                 upsert_query = f"""
@@ -660,8 +660,13 @@ create_alt_address_table_if_not_exists(conn) # V30: Cria a tabela de Endereço A
 
 st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
-# CRIAÇÃO DAS ABAS 
-tab1, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização e Alternativo"]) # V30: Renomeia Aba 3
+# CRIAÇÃO DAS ABAS (Quatro Abas)
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🚀 Pré-Roteirização (Importação)", 
+    "📋 Pós-Roteirização (Impressão/Cópia)", 
+    "💾 Gerenciar Cache de Geoloc", # Novo título
+    "📌 Gerenciar Matches Alternativos" # Nova Aba
+])
 
 
 # ----------------------------------------------------------------------------------
@@ -764,12 +769,11 @@ with tab1:
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
         
-        # V30: REMOÇÃO DA SEÇÃO 1.3 - ENDEREÇOS ALTERNATIVOS TEMPORÁRIOS
-
-        st.markdown("---")
-        st.subheader("1.3 Configurar e Processar") # V30: Seção renomeada
         
-        st.info("⚠️ **Endereços Alternativos** são carregados automaticamente do **Cache** na **Aba 3**.")
+        st.markdown("---")
+        st.subheader("1.3 Configurar e Processar")
+        
+        st.info("⚠️ **Endereços Alternativos** são carregados automaticamente do **Cache na Aba 4**.")
         
         limite_similaridade_ajustado = st.slider(
             'Ajuste a Precisão do Corretor (Fuzzy Matching):',
@@ -837,7 +841,7 @@ with tab1:
                 
                 # Download Circuit 
                 buffer_circuit = io.BytesIO()
-                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                with pd.ExcelWriter(buffer_circuit, engine='openypxl') as writer:
                     df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral') 
                     
                     if not df_volumosos_separado.empty:
@@ -1037,7 +1041,7 @@ with tab2:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO E ALTERNATIVO
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (PRINCIPAL LAT/LON)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1050,21 +1054,6 @@ def clear_lat_lon_fields():
         st.session_state['form_colar_coord'] = ""
     if 'form_new_endereco' in st.session_state:
         st.session_state['form_new_endereco'] = ""
-
-# V30: Nova Função - Limpa os campos de Endereço Alternativo
-def clear_alt_address_fields():
-    """Limpa os campos de Endereço Alternativo."""
-    if 'form_alt_endereco_principal' in st.session_state:
-        st.session_state['form_alt_endereco_principal'] = ""
-    if 'form_alt_endereco' in st.session_state:
-        st.session_state['form_alt_endereco'] = ""
-    if 'form_alt_lat' in st.session_state:
-        st.session_state['form_alt_lat'] = ""
-    if 'form_alt_lon' in st.session_state:
-        st.session_state['form_alt_lon'] = ""
-    if 'form_alt_colar_coord' in st.session_state:
-        st.session_state['form_alt_colar_coord'] = ""
-
 
 def apply_google_coords(lat_key, lon_key, coord_input_key):
     """Processa a string colada do Google Maps e preenche Lat/Lon."""
@@ -1103,23 +1092,43 @@ def apply_google_coords(lat_key, lon_key, coord_input_key):
                 
     st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
 
+# Funções auxiliares para o Cache Alternativo
+def clear_alt_address_fields():
+    """Limpa os campos de Endereço Alternativo."""
+    if 'form_alt_endereco_principal' in st.session_state:
+        st.session_state['form_alt_endereco_principal'] = ""
+    if 'form_alt_endereco' in st.session_state:
+        st.session_state['form_alt_endereco'] = ""
+    if 'form_alt_lat' in st.session_state:
+        st.session_state['form_alt_lat'] = ""
+    if 'form_alt_lon' in st.session_state:
+        st.session_state['form_alt_lon'] = ""
+    if 'form_alt_colar_coord' in st.session_state:
+        st.session_state['form_alt_colar_coord'] = ""
+        
+def export_cache(df_cache, columns):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_cache[columns].to_excel(writer, index=False, sheet_name='Cache')
+    buffer.seek(0)
+    return buffer
+
 
 with tab3:
-    st.header("💾 Gerenciamento dos Caches Persistentes")
-    st.info("Aqui você gerencia as correções salvas (Lat/Lon e Endereços Alternativos).")
+    st.header("💾 Gerenciamento do Cache de Geolocalização Principal (Lat/Lon)")
+    st.info("Aqui você registra as correções de Latitude e Longitude para endereços que o Circuit não consegue roteirizar.")
 
-    # 1. Carrega os caches salvos
+    # 1. Carrega o cache salvo
     df_cache_original = load_geoloc_cache(conn).fillna("")
-    df_alt_address_original = load_alt_address_cache(conn).fillna("")
     
     
     # =========================================================================
     # SEÇÃO 1: CACHE DE GEOLOCALIZAÇÃO (PRINCIPAL)
     # =========================================================================
-    st.subheader("3.1 Cache de Geolocalização (Principal Lat/Lon)")
+    st.subheader("3.1 Registrar Nova Correção Principal (Lat/Lon)")
     st.caption("A chave de busca é a combinação exata de **Endereço + Bairro** da sua planilha original.")
     
-    with st.expander("Adicionar Nova Correção Principal (Lat/Lon)"):
+    with st.expander("Adicionar Nova Correção Principal"):
         # Container para o formulário
         
         st.subheader("1. Preencher Endereço")
@@ -1208,13 +1217,6 @@ with tab3:
     col_backup_geo, col_restauracao_geo, col_limpeza_geo = st.columns(3)
     
     with col_backup_geo:
-        def export_cache(df_cache, columns):
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_cache[columns].to_excel(writer, index=False, sheet_name='Cache')
-            buffer.seek(0)
-            return buffer
-            
         if not df_cache_original.empty:
             backup_file = export_cache(df_cache_original, CACHE_COLUMNS)
             st.download_button(
@@ -1248,17 +1250,27 @@ with tab3:
             if st.button("🔴 Excluir Cache Principal", key="btn_final_clear_cache_geo"):
                 clear_geoloc_cache_db(conn)
 
-    st.markdown("---")
+
+# ----------------------------------------------------------------------------------
+# ABA 4: GERENCIAR CACHE DE ENDEREÇO ALTERNATIVO (NOVA ABA)
+# ----------------------------------------------------------------------------------
+
+with tab4:
+    st.header("📌 Gerenciamento de Matches de Endereço Alternativo")
+    st.info("Utilize esta seção para registrar manualmente um endereço (chave de busca) e o endereço alternativo/ponto de referência, incluindo a geolocalização do ponto de referência.")
+    
+    # 1. Carrega o cache alternativo salvo
+    df_alt_address_original = load_alt_address_cache(conn).fillna("")
 
     # =========================================================================
-    # V30: SEÇÃO 2: CACHE DE ENDEREÇO ALTERNATIVO
+    # SEÇÃO 4.1: REGISTRO DE ENDEREÇO ALTERNATIVO
     # =========================================================================
-    st.subheader("3.2 Cache de Endereço Alternativo (Registro de Matches Manuais)") # <--- Título Ajustado
-    st.caption("A chave de busca é a mesma do cache principal: **Endereço + Bairro** do seu arquivo original.")
+    st.subheader("4.1 Registrar Novo Match Manual")
+    st.caption("A chave de busca (Endereço Digitado) será usada na Aba 1 para aplicar o Match/Sugestão abaixo.")
     
-    with st.expander("Adicionar Novo Match/Sugestão de Endereço Alternativo"): # <--- Título Ajustado
+    with st.expander("Adicionar Novo Match/Sugestão de Endereço Alternativo"): 
         
-        st.subheader("1. Endereço Digitado (Chave de Busca para o Match)") # <--- Título Ajustado
+        st.subheader("1. Endereço Digitado (Chave de Busca para o Match)")
         if 'form_alt_endereco_principal' not in st.session_state:
             st.session_state['form_alt_endereco_principal'] = ""
         
@@ -1270,13 +1282,13 @@ with tab3:
         )
 
         st.markdown("---")
-        st.subheader("2. Sugestão de Endereço Alternativo (o Match) e Coordenadas") # <--- Título Ajustado
+        st.subheader("2. Sugestão de Endereço Alternativo (o Match) e Coordenadas") 
         
         if 'form_alt_endereco' not in st.session_state:
             st.session_state['form_alt_endereco'] = ""
         
         new_alt_endereco = st.text_area(
-            "2. Endereço Alternativo COMPLETO (Sugestão do Match)", # <--- Título Ajustado
+            "2. Endereço Alternativo COMPLETO (Sugestão do Match)",
             key="form_alt_endereco", 
             height=70,
             help="O novo endereço (corrigido/alternativo/referência) que será sugerido (Alt_Address)."
@@ -1387,3 +1399,4 @@ with tab3:
         if confirm_clear_alt:
             if st.button("🔴 Excluir Cache Alternativo", key="btn_final_clear_cache_alt"):
                 clear_alt_address_cache_db(conn)
+

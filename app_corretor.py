@@ -1190,7 +1190,8 @@ with tab3:
         def export_cache(df_cache):
             """Prepara o DataFrame para download em Excel."""
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openypxl') as writer:
+            # V31 CORRIGIDO: de 'openypxl' para 'openpyxl'
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
                 # Usa as colunas exatas do cache (colunas requeridas para importação)
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)
@@ -1246,3 +1247,4 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
+

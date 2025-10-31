@@ -11,7 +11,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 
 # --- Configurações Iniciais da Página ---
-st.set_page_config(
+st.set_page_page_config(
     page_title="Circuit Flow Completo",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -259,57 +259,12 @@ def get_most_common_or_empty(x):
         return ""
     return x_limpo.mode().iloc[0]
 
-# --- V29: Função para Parsear Endereços Alternativos ---
-def parse_alternative_addresses(text_input):
-    """
-    Parses a text input where each line is: Sequence_ID | Alt_Address | Alt_Lat | Alt_Lon
-    Returns a DataFrame.
-    """
-    if not text_input:
-        return pd.DataFrame(columns=['Sequence', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude'])
 
-    lines = text_input.strip().split('\n')
-    data = []
-    
-    for line in lines:
-        try:
-            parts = [p.strip() for p in line.split('|')]
-            if len(parts) >= 4:
-                sequence_id = parts[0]
-                alt_address = parts[1]
-                alt_lat = parts[2].replace(',', '.')
-                alt_lon = parts[3].replace(',', '.')
-                
-                # Basic validation
-                if sequence_id and alt_address and pd.to_numeric(alt_lat, errors='coerce') is not None and pd.to_numeric(alt_lon, errors='coerce') is not None:
-                    data.append({
-                        'Sequence': sequence_id,
-                        'Alt_Address': alt_address,
-                        'Alt_Latitude': float(alt_lat),
-                        'Alt_Longitude': float(alt_lon)
-                    })
-        except Exception:
-            # Skip lines that don't match the format
-            continue
-            
-    # CRITICAL: Ensure 'Sequence' is the same type as in df_para_processar (string)
-    df_alt = pd.DataFrame(data)
-    if not df_alt.empty:
-        df_alt['Sequence'] = df_alt['Sequence'].astype(str).str.strip()
-        # Drop duplicates, keeping the last one (most recent entry)
-        df_alt = df_alt.drop_duplicates(subset=['Sequence'], keep='last')
-
-    return df_alt
-
-
-# V30 FIX: Adiciona hash_funcs para ignorar o objeto sqlite3.Connection (conn) no cache do Streamlit,
-# corrigindo o UnhashableParamError, caso o usuário passe conn.
-@st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"}) 
-def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc, df_alt_address_input, conn): # V30 FIX: Adiciona 'conn' ao argumento
+@st.cache_data
+def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc):
     """
     Função principal que aplica a correção (usando cache 100% match) e o agrupamento.
     """
-    # NOTE: 'conn' é passado apenas para satisfazer o Streamlit cache e não é usado aqui.
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
@@ -366,72 +321,54 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         
+        st.info(f"Cache aplicado com 100% de match (Endereço + Bairro)! **{cache_mask.sum()}** registros de geolocalização foram corrigidos automaticamente pelas suas edições no cache.")
+
         # Remove colunas auxiliares
         df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
     # =========================================================================
-    # V29: PASSO 2: MERGE COM ENDEREÇO ALTERNATIVO
-    # =========================================================================
-    df[COLUNA_SEQUENCE] = df[COLUNA_SEQUENCE].astype(str)
-    
-    if not df_alt_address_input.empty:
-        # Merge dos endereços alternativos baseados no ID da Sequence (pacote)
-        df = pd.merge(
-            df,
-            df_alt_address_input[['Sequence', 'Alt_Address', 'Alt_Latitude', 'Alt_Longitude']],
-            on='Sequence',
-            how='left'
-        )
-    
-    # Preenche NA para as novas colunas para permitir a agregação
-    if 'Alt_Address' not in df.columns:
-         df['Alt_Address'] = None
-         df['Alt_Latitude'] = None
-         df['Alt_Longitude'] = None
-         
-    # =========================================================================
-    # PASSO 3: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
+    # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
     # =========================================================================
     
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
     
-    # Código de Fuzzy Matching (mantido)
     progresso_bar = st.progress(0, text="Iniciando Fuzzy Matching e Agrupamento...")
     total_unicos = len(enderecos_unicos)
     
     if total_unicos == 0:
         progresso_bar.empty()
-        # Se for 0, provavelmente o DataFrame está vazio, mas o retorno None já trata
-        pass 
-    else:
-        for i, end_principal in enumerate(enderecos_unicos):
-            if end_principal not in mapa_correcao:
-                matches = process.extract(
-                    end_principal, 
-                    enderecos_unicos, 
-                    scorer=fuzz.WRatio, 
-                    limit=None
-                )
-                grupo_matches = [
-                    match[0] for match in matches 
-                    if match[1] >= limite_similaridade
-                ]
+        st.warning("Nenhum endereço encontrado para processar.")
+        return None
+    
+    for i, end_principal in enumerate(enderecos_unicos):
+        if end_principal not in mapa_correcao:
+            matches = process.extract(
+                end_principal, 
+                enderecos_unicos, 
+                scorer=fuzz.WRatio, 
+                limit=None
+            )
+            grupo_matches = [
+                match[0] for match in matches 
+                if match[1] >= limite_similaridade
+            ]
+            
+            df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
+            
+            endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
+            
+            if not endereco_oficial_original:
+                 endereco_oficial_original = end_principal 
+            
+            for end_similar in grupo_matches:
+                mapa_correcao[end_similar] = endereco_oficial_original
                 
-                df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-                
-                endereco_oficial_original = get_most_common_or_empty(df_grupo[COLUNA_ENDERECO])
-                
-                if not endereco_oficial_original:
-                     endereco_oficial_original = end_principal 
-                
-                for end_similar in grupo_matches:
-                    mapa_correcao[end_similar] = endereco_oficial_original
-                    
-            progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
-        
+        progresso_bar.progress((i + 1) / total_unicos, text=f"Processando {i+1} de {total_unicos} endereços únicos...")
+    
     progresso_bar.empty()
+    st.success("Fuzzy Matching concluído!")
 
     # Aplicação do Endereço Corrigido (Chave de Agrupamento)
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
@@ -439,9 +376,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     # Agrupamento (Chave: Endereço Corrigido + Cidade + BAIRRO)
     colunas_agrupamento = ['Endereco_Corrigido', 'City', COLUNA_BAIRRO] 
     
-    # =========================================================================
-    # V29: AGRUPAMENTO - ADICIONANDO ENDEREÇOS ALTERNATIVOS
-    # =========================================================================
     df_agrupado = df.groupby(colunas_agrupamento).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
@@ -452,21 +386,14 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
         Bairro_Agrupado=(COLUNA_BAIRRO, get_most_common_or_empty),
         Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         
-        Min_Sequence=('Sequence_Num', 'min'),
-        
-        # V29: NOVOS CAMPOS - Agrega os endereços alternativos únicos no grupo
-        Alt_Addresses_List=('Alt_Address', lambda x: '; '.join(x.dropna().astype(str).unique())),
-        Alt_Latitudes_List=('Alt_Latitude', lambda x: '; '.join(map(str, x.dropna().astype(str).unique()))),
-        Alt_Longitudes_List=('Alt_Longitude', lambda x: '; '.join(map(str, x.dropna().astype(str).unique()))),
+        Min_Sequence=('Sequence_Num', 'min') 
         
     ).reset_index()
 
     # Ordenação
     df_agrupado = df_agrupado.sort_values(by='Min_Sequence').reset_index(drop=True)
     
-    # =========================================================================
-    # V29: FORMATAÇÃO DO DF PARA O CIRCUIT
-    # =========================================================================
+    # Formatação do DF para o CIRCUIT 
     endereco_completo_circuit = (
         df_agrupado['Endereco_Corrigido'] + ', ' + 
         df_agrupado['Bairro_Agrupado'].str.strip() 
@@ -475,149 +402,84 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*$', '', regex=True) 
     
-    # 1. Cria a coluna Alt_LatLon
-    df_agrupado['Alt_LatLon'] = (
-        df_agrupado['Alt_Latitudes_List'].astype(str) + ', ' + 
-        df_agrupado['Alt_Longitudes_List'].astype(str)
-    )
-    # Limpeza da coluna Alt_LatLon
-    df_agrupado['Alt_LatLon'] = df_agrupado['Alt_LatLon'].str.replace(r',\s*$', '', regex=True).str.strip() 
-    df_agrupado['Alt_LatLon'] = df_agrupado['Alt_LatLon'].replace(' , ', '', regex=False).replace(r'^,$|^$', None, regex=True) # Limpa se for apenas vírgula ou vazio
-
-    # 2. Adiciona as anotações alternativas se existirem
-    alt_notes_mask = df_agrupado['Alt_Addresses_List'].notna() & (df_agrupado['Alt_Addresses_List'] != '')
-    df_agrupado.loc[alt_notes_mask, 'Notes_Alternativas'] = (
-        ' | ENDEREÇO ALTERNATIVO ENCONTRADO: ' + df_agrupado['Alt_Addresses_List'].astype(str) + 
-        ' (COORDENADAS: ' + df_agrupado['Alt_LatLon'].astype(str) + ')'
-    )
-    df_agrupado['Notes_Alternativas'] = df_agrupado['Notes_Alternativas'].fillna('')
-
-
     notas_completas = (
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
-        ' | CEP: ' + df_agrupado['Zipcode_Agrupado'] +
-        df_agrupado['Notes_Alternativas'] # V29: ANEXA A NOTA ALTERNATIVA
+        ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
 
-    # V32: MANTEMOS AS COLUNAS ALT_ AQUI PARA REFERÊNCIA E VISUALIZAÇÃO INTERNA.
-    # O FILTRO PARA REMOVÊ-LAS DO EXCEL SERÁ FEITO NO MOMENTO DO DOWNLOAD (LINHA 454).
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
-        'Notes': notas_completas,
-        'Alt_Address': df_agrupado['Alt_Addresses_List'].replace('', None), 
-        'Alt_LatLon': df_agrupado['Alt_LatLon']
+        'Notes': notas_completas
     }) 
     
     return df_circuit
 
-# =======================================================================================================
-# FUNÇÃO ABA 2: PÓS-ROTEIRIZAÇÃO (V34 - CORREÇÃO CRÍTICA DE VOLUMOSOS)
-# =======================================================================================================
+# ===============================================
+# FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# ===============================================
 
-def processar_rota_para_impressao(df_input, volumoso_ids_set):
+def processar_rota_para_impressao(df_input):
     """
-    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia,
-    **forçando a marcação de volumoso** usando o set de IDs da Aba 1. (V34)
+    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     
-    Recebe: 
-        1. df_input (DataFrame da rota pós-Circuit)
-        2. volumoso_ids_set (Set de IDs originais de pacotes volumosos - de st.session_state)
+    V28: CORREÇÃO CRÍTICA do filtro de Não-Volumosos para ignorar números do endereço, 
+         filtrando apenas pelos IDs na coluna 'Ordem ID'.
     """
     coluna_notes_lower = 'notes'
     
     if coluna_notes_lower not in df_input.columns:
-        coluna_notes_lower = 'Notes' 
-        if coluna_notes_lower not in df_input.columns:
-             raise KeyError(f"A coluna 'Notes' ou 'notes' não foi encontrada.") 
+        raise KeyError(f"A coluna '{coluna_notes_lower}' não foi encontrada.") 
     
     df = df_input.copy()
     df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
     df = df.dropna(subset=[coluna_notes_lower]) 
     
-    # 1. Preparação: Extrai os IDs Agrupados da Rota (Ex: '14,15*,16; Rua Nova York...') -> '14,15*,16'
-    # .str[0] pega tudo antes do primeiro ';'
-    df['ID(s) Agrupado'] = df[coluna_notes_lower].str.split(';', n=1).str[0].astype(str).str.strip().str.strip('"') 
-    
-    # Lista de IDs que originalmente ERAM volumosos (strings limpas sem *)
-    # O set contém IDs com ou sem *, então limpamos para ter a referência pura: {'123', '45'}
-    ids_volumosos_sem_asterisco = {str(id).replace('*', '').strip() for id in volumoso_ids_set}
-
-    # 2. Função para Remarcar o '*' na Rota
-    def remarcar_volumoso_v34(row):
-        ids_agrupados = row['ID(s) Agrupado']
-        
-        if pd.isna(ids_agrupados) or not ids_agrupados: 
-            return row[coluna_notes_lower], False # Retorna o note original e Não-Volumoso
-
-        # Limpa todos os '*' que já possam ter vindo e separa os IDs
-        # Ex: '14,15*,16' -> ['14', '15', '16']
-        ids_lista = [id.strip().replace('*', '') for id in ids_agrupados.split(',')]
-        ids_remarcados = []
-        is_volumoso_parada = False
-        
-        # Remarcação
-        for id_limpo in ids_lista:
-            # Checa se o ID Limpo (sem *) está no set de IDs volumosos originais
-            if id_limpo in ids_volumosos_sem_asterisco:
-                ids_remarcados.append(f"{id_limpo}*") # Re-insere o *
-                is_volumoso_parada = True # Marca a parada como volumosa
-            else:
-                ids_remarcados.append(id_limpo) # Mantém sem *
-        
-        # Reconstrução da coluna 'Notes' (IDs corrigidos + Anotação)
-        nova_string_ids = ','.join(ids_remarcados)
-        
-        # Extrai o restante da anotação (o que vem depois do primeiro ';')
-        anotacao = ''
-        partes_notes = row[coluna_notes_lower].split(';')
-        if len(partes_notes) > 1:
-            # Reconstroi o restante, incluindo o ';'
-            anotacao = ';' + ';'.join(partes_notes[1:])
-        
-        # Constrói a nova coluna 'Notes Corrigida'
-        nova_notes = f"{nova_string_ids}{anotacao}"
-        
-        return nova_notes, is_volumoso_parada
-        
-    # 3. Aplica a função de remarcação
-    try:
-        remarcacao_results = df.apply(remarcar_volumoso_v34, axis=1, result_type='expand')
-    except Exception as e:
-        st.error(f"Erro ao aplicar a correção de volumosos na coluna 'Notes'. Verifique o formato do ID. Erro: {e}")
-        return None, None, None
-        
-    df['Notes Corrigida'] = remarcacao_results[0]
-    df['É Volumoso'] = remarcacao_results[1]
-    
-    # 4. Cria a coluna final de impressão usando a 'Notes Corrigida'
     # Coluna "Ordem ID" é o primeiro campo antes do ';'
-    df_split_corrected = df['Notes Corrigida'].str.split(';', n=1, expand=True)
+    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
+    # 1. Tira as aspas extras, se houver, e tira espaços
+    df['Ordem ID'] = df_split[0].astype(str).str.strip().str.strip('"') 
+    df['Anotações Completas'] = df_split[1].astype(str).str.strip().str.strip('"') if 1 in df_split.columns else ""
     
-    # A coluna Ordem ID agora está com os * (corrigidos)
-    df['Ordem ID'] = df_split_corrected[0].astype(str).str.strip().str.strip('"') 
-    df['Anotações Completas'] = df_split_corrected[1].astype(str).str.strip().str.strip('"').fillna("")
-    
+    # DataFrame GERAL (Para Cópia e Download)
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
         df['Anotações Completas'].astype(str)
     )
     
-    # 5. Separação Final
+    # DataFrame FINAL GERAL
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
-    # df_volumosos: Paradas onde 'É Volumoso' é True (puros ou mistos)
-    df_volumosos_impressao = df[df['É Volumoso'] == True].copy()
-    df_volumosos_impressao = df_volumosos_impressao[['Lista de Impressão', 'address']].copy()
+    # =========================================================================
+    # 1. FILTRAR VOLUMOSOS (Lógica mantida, pois está correta)
+    # Critério: O agrupamento contém PELO MENOS UM item com '*'
+    # =========================================================================
+    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
+    df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
-    # df_nao_volumosos: Paradas onde 'É Volumoso' é False (apenas puros não-volumosos)
-    df_nao_volumosos_impressao = df[df['É Volumoso'] == False].copy() 
-    df_nao_volumosos_impressao = df_nao_volumosos_impressao[['Lista de Impressão', 'address']].copy()
+    # =========================================================================
+    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO CRÍTICA V28)
+    # Critério: O agrupamento contém PELO MENOS UM ID sem o caractere '*'
+    # =========================================================================
     
+    # Passo 1: Extrair APENAS a lista de IDs (tudo que está ANTES do " - " na coluna Ordem ID)
+    # Ex: "121*,122 - Herbert José de Souza..." -> Pega "121*,122"
+    df['Lista_IDs'] = df['Ordem ID'].str.split(' - ', n=1, expand=True)[0]
+    
+    # Passo 2: Aplicar a Regex APENAS na Lista de IDs (ignorando o endereço)
+    # Regex: Procura por um ou mais dígitos (\d+) que NÃO são seguidos por um asterisco (?![\*])
+    # Como 'Lista_IDs' não contém o número do endereço, essa busca é segura.
+    df_nao_volumosos = df[df['Lista_IDs'].str.contains(r'\d+(?![\*])', regex=True, na=False)].copy() 
+    
+    df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
+    
+    # Remove a coluna auxiliar
+    df = df.drop(columns=['Lista_IDs'], errors='ignore')
+
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
 
 
@@ -648,9 +510,6 @@ with tab1:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
         st.session_state['volumoso_ids'] = set() 
-    # V29: Inicializa o estado para o texto de endereço alternativo
-    if 'text_area_alt_address' not in st.session_state:
-        st.session_state['text_area_alt_address'] = ""
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -674,13 +533,11 @@ with tab1:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
-            # Resetar as marcações e textos se um novo arquivo for carregado
+            # Resetar as marcações se um novo arquivo for carregado
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
-                 st.session_state['text_area_alt_address'] = "" # V29: Limpar Alt Address
-                 st.session_state['df_alt_address'] = None # Forçar recálculo
-                 
+
 
             st.session_state['df_original'] = df_input_pre.copy()
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
@@ -711,7 +568,6 @@ with tab1:
         # --- FIM ORDENAÇÃO ---
         
         def update_volumoso_ids(order_id, is_checked):
-            """Adiciona/Remove o ID (que pode conter *) do set de volumosos na session state."""
             if is_checked:
                 st.session_state['volumoso_ids'].add(order_id)
             elif order_id in st.session_state['volumoso_ids']:
@@ -720,20 +576,27 @@ with tab1:
         st.caption("Marque os números das ordens de serviço que são volumosas (serão marcadas com *):")
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
-        # BLOCO DE CORREÇÃO DO LAYOUT V24
+        # -------------------------------------------------------------------------------------
+        # BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
+        # -------------------------------------------------------------------------------------
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
         
+        # Divide a lista em pedaços de 5 (linhas)
         chunked_list = [
             ordens_originais_sorted[i:i + NUM_COLS] 
             for i in range(0, total_items, NUM_COLS)
         ]
 
         with st.container(height=300):
+            # Itera sobre cada "linha" (chunk)
             for row_chunk in chunked_list:
+                # CRÍTICO: Define uma NOVA linha de colunas para este chunk
                 cols = st.columns(len(row_chunk)) 
                 
+                # Itera sobre os itens da linha (1, 2, 3, 4, 5)
                 for col_index, order_id in enumerate(row_chunk):
+                    # Usa o índice para mapear na coluna recém-criada
                     with cols[col_index]: 
                         is_checked = order_id in st.session_state['volumoso_ids']
                         st.checkbox(
@@ -743,29 +606,13 @@ with tab1:
                             on_change=update_volumoso_ids, 
                             args=(order_id, not is_checked) 
                         )
+        # -------------------------------------------------------------------------------------
+
 
         st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
         
-        # ----------------------------------------------------------------------------------
-        # V29: NOVO BLOCO - ENDEREÇOS ALTERNATIVOS
-        # ----------------------------------------------------------------------------------
         st.markdown("---")
-        st.subheader("1.3 Endereços Alternativos (Opção de Rota)")
-        st.warning("⚠️ **Atenção:** Use esta opção apenas para endereços alternativos de entrega (ex: casa de vizinho, novo endereço de empresa, etc.)")
-        
-        st.caption("Insira os dados no formato: `ID_DA_SEQUÊNCIA | Endereço Alternativo Completo | Latitude | Longitude`")
-        
-        st.text_area(
-            'Cole a lista de endereços alternativos aqui (um por linha):', 
-            height=150,
-            key="text_area_alt_address",
-            help="Exemplo:\n121 | Rua das Empresas, 45, Fundos | -23.1234 | -52.5678\n45* | Av Principal, 100, Portaria | -23.5555 | -52.6666"
-        )
-        # ----------------------------------------------------------------------------------
-
-
-        st.markdown("---")
-        st.subheader("1.4 Configurar e Processar")
+        st.subheader("1.3 Configurar e Processar")
         
         limite_similaridade_ajustado = st.slider(
             'Ajuste a Precisão do Corretor (Fuzzy Matching):',
@@ -786,35 +633,17 @@ with tab1:
             
             for id_volumoso in st.session_state['volumoso_ids']:
                 str_id_volumoso = str(id_volumoso)
-                
-                # Aplica o * somente se ele não estiver presente no ID original (para evitar **)
-                if '*' not in str_id_volumoso:
-                    df_para_processar.loc[
-                        df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
-                        COLUNA_SEQUENCE
-                    ] = str_id_volumoso + '*'
-                # Se o ID já tinha *, ele fica como está, mas o agrupamento o removerá para o Circuit
-                
-            # 2. V29: PARSE ALTERNATIVE ADDRESSES FROM TEXT AREA
-            alt_address_text = st.session_state.get('text_area_alt_address', '')
-            df_alt_address = parse_alternative_addresses(alt_address_text)
-            
-            if not df_alt_address.empty:
-                st.info(f"Foram identificados **{len(df_alt_address)}** pacotes com endereços alternativos.")
+                df_para_processar.loc[
+                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                    COLUNA_SEQUENCE
+                ] = str_id_volumoso + '*'
 
-            # 3. Carregar Cache de Geolocalização (O @st.cache_data garante que ele pega o último salvo)
+            # 2. Carregar Cache de Geolocalização (O @st.cache_data garante que ele pega o último salvo)
             df_cache = load_geoloc_cache(conn)
 
-            # 4. Iniciar o processamento e agrupamento
-            with st.spinner('Aplicando cache 100% match, processando dados e endereços alternativos...'):
-                 # V30 FIX: Passa a conexão 'conn' para a função, que agora é configurada para ignorá-la no cache
-                 df_circuit = processar_e_corrigir_dados(
-                     df_para_processar, 
-                     limite_similaridade_ajustado, 
-                     df_cache,
-                     df_alt_address,
-                     conn # V30 FIX: Passa a conexão (para evitar UnhashableParamError)
-                 )
+            # 3. Iniciar o processamento e agrupamento
+            with st.spinner('Aplicando cache 100% match e processando dados...'):
+                 df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
             
             if df_circuit is not None:
                 
@@ -837,25 +666,14 @@ with tab1:
                 
                 # --- SAÍDA PARA CIRCUIT (ROTEIRIZAÇÃO) ---
                 st.subheader("Arquivo para Roteirização (Circuit)")
-                st.info("O arquivo de download contém apenas as 5 colunas padrão do Circuit (`Order ID`, `Address`, `Latitude`, `Longitude`, `Notes`).")
-                
-                # Exibe apenas as colunas principais para visualização
-                df_display = df_circuit[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']].copy()
-                st.dataframe(df_display, use_container_width=True)
+                st.dataframe(df_circuit, use_container_width=True)
                 
                 # Download Circuit 
                 buffer_circuit = io.BytesIO()
-                
-                # V32: Define as colunas que devem ser exportadas (APENAS as 5 padrão)
-                circuit_cols = ['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']
-                
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    # V32: Escreve APENAS as colunas padrão do Circuit
-                    df_circuit[circuit_cols].to_excel(writer, index=False, sheet_name='Circuit_Import_Geral') 
-                    
+                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
                     if not df_volumosos_separado.empty:
-                        # V32: Garante que a aba de volumosos também só tenha as colunas padrão
-                        df_volumosos_separado[circuit_cols].to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
                         st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
                     else:
                         st.info("Nenhum pacote volumoso marcado. O arquivo de download terá apenas a aba principal.")
@@ -876,8 +694,8 @@ with tab1:
 # ----------------------------------------------------------------------------------
 
 with tab2:
-    st.header("2. Limpar Saída do Circuit para Impressão (Correção V34)")
-    st.warning("⚠️ **Atenção:** A correção de volumosos na V34 usa o set de IDs que você marcou na Aba 1.")
+    st.header("2. Limpar Saída do Circuit para Impressão")
+    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
 
     st.markdown("---")
     st.subheader("2.1 Carregar Arquivo da Rota")
@@ -916,43 +734,15 @@ with tab2:
             df_input_pos.columns = df_input_pos.columns.str.strip() 
             df_input_pos.columns = df_input_pos.columns.str.lower()
             
-            # --- Tenta corrigir o problema de maiúsculas/minúsculas da coluna Notes ---
-            if 'notes' not in df_input_pos.columns:
-                df_input_pos.columns = [
-                    col.lower() if col.lower() == 'notes' or col.lower() == 'address' else col
-                    for col in df_input_pos.columns
-                ]
-            
+
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            st.markdown("---")
-            st.subheader("2.2 Iniciar Processamento e Correção de Volumosos")
-            
-            # ------------------------------------------------------------------------
-            # V34: NOVO BLOCO - CORREÇÃO DE VOLUMOSOS PELA SESSÃO
-            # ------------------------------------------------------------------------
-            # 1. Garante que a lista de IDs Volumosos esteja acessível
-            if 'volumoso_ids' not in st.session_state:
-                st.session_state['volumoso_ids'] = set()
-                
-            volumoso_ids_para_correcao = st.session_state['volumoso_ids'].copy()
-            
-            # 2. Aviso se a lista de controle estiver vazia
-            if not volumoso_ids_para_correcao and len(st.session_state.get('df_original', [])) > 0:
-                st.warning("⚠️ **Atenção:** A lista de IDs Volumosos da Aba 1 está vazia. Certifique-se de que você marcou os pacotes volumosos na Aba 1 antes de executar esta etapa.")
-            
-            
-            # 3. CHAMA A FUNÇÃO DE PROCESSAMENTO (V34: Aplica a correção forçada de volumosos)
-            with st.spinner('Aplicando correção forçada de volumosos e separando listas...'):
-                 df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(
-                     df_input_pos,
-                     volumoso_ids_para_correcao # PASSANDO O SET DE IDS DA ABA 1
-                 )
-            # ------------------------------------------------------------------------
-
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V28 APLICADA AQUI)
+            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
-                
+                st.markdown("---")
+                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
                 st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
                 df_visualizacao_geral = df_final_geral.copy()
@@ -964,11 +754,11 @@ with tab2:
                 
                 # --- SEÇÃO DEDICADA AOS NÃO-VOLUMOSOS ---
                 st.markdown("---")
-                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS (Puros)")
+                st.header("✅ Lista de Impressão APENAS NÃO-VOLUMOSOS")
                 
                 if not df_nao_volumosos_impressao.empty:
                     # Contagem agora reflete agrupamentos puros E agrupamentos mistos
-                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços que contêm **APENAS** pacotes não-volumosos.")
+                    st.success(f"Foram encontrados **{len(df_nao_volumosos_impressao)}** endereços com pacotes NÃO-volumosos (puros ou mistos) nesta rota.")
                     
                     df_visualizacao_nao_vol = df_nao_volumosos_impressao.copy()
                     df_visualizacao_nao_vol.columns = ['ID(s) Agrupado - Anotações', 'Endereço da Parada']
@@ -977,11 +767,11 @@ with tab2:
                     copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Nenhum pacote não-volumoso puro encontrado nesta rota.")
+                    st.info("Nenhum pacote não-volumoso encontrado nesta rota (todos os pedidos são volumosos ou a lista está vazia).")
                     
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")
-                st.header("📦 Lista de Impressão APENAS VOLUMOSOS (Puros e Mistos)")
+                st.header("📦 Lista de Impressão APENAS VOLUMOSOS")
                 
                 if not df_volumosos_impressao.empty:
                     # Contagem agora reflete agrupamentos puros E agrupamentos mistos
@@ -1005,7 +795,7 @@ with tab2:
             if "Table 3" in str(ke) or "Sheet" in str(ke):
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel. Verifique o nome da aba.")
             elif 'notes' in str(ke):
-                 st.error(f"Erro de Coluna: A coluna 'Notes' ou 'notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
+                 st.error(f"Erro de Coluna: A coluna 'Notes' não foi encontrada. Verifique se o arquivo da rota está correto.")
             elif 'address' in str(ke):
                  st.error(f"Erro de Coluna: A coluna 'Address' (ou 'address') não foi encontrada. Verifique o arquivo de rota.")
             else:
@@ -1030,8 +820,8 @@ with tab2:
 
         # --- ÁREA DE CÓPIA NÃO-VOLUMOSOS ---
         if not df_nao_volumosos_impressao.empty if df_nao_volumosos_impressao is not None else False:
-            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos Puros)")
-            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (apenas grupos puros).")
+            st.markdown("### 2.4 Copiar para a Área de Transferência (APENAS NÃO-Volumosos)")
+            st.success("Lista Filtrada: Contém **somente** os endereços com pacotes **NÃO-volumosos** (puros ou agrupamentos mistos).")
             
             st.text_area(
                 'Conteúdo da Lista de Impressão NÃO-VOLUMOSOS (Alinhado à Esquerda):', 
@@ -1042,7 +832,7 @@ with tab2:
         
         # --- ÁREA DE CÓPIA VOLUMOSOS ---
         if not df_volumosos_impressao.empty if df_volumosos_impressao is not None else False:
-            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos Puros e Mistos)")
+            st.markdown("### 2.5 Copiar para a Área de Transferência (APENAS Volumosos)")
             st.warning("Lista Filtrada: Contém **somente** os endereços com pacotes volumosos (puros ou agrupamentos mistos).")
             
             st.text_area(
@@ -1235,7 +1025,7 @@ with tab3:
                         # O rerun irá finalizar a limpeza do endereço
                         
                     except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidas. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
+                        st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
         
         with clear_button_col:
              st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")
@@ -1266,8 +1056,7 @@ with tab3:
         def export_cache(df_cache):
             """Prepara o DataFrame para download em Excel."""
             buffer = io.BytesIO()
-            # V31 CORRIGIDO: de 'openypxl' para 'openpyxl'
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 # Usa as colunas exatas do cache (colunas requeridas para importação)
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)

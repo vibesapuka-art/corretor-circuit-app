@@ -514,79 +514,110 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc,
     
     return df_circuit
 
-# ... (Função processar_rota_para_impressao permanece a mesma - V28/V29) ...
+# =======================================================================================================
+# FUNÇÃO ABA 2: PÓS-ROTEIRIZAÇÃO (V34 - CORREÇÃO CRÍTICA DE VOLUMOSOS)
+# =======================================================================================================
 
-def processar_rota_para_impressao(df_input):
+def processar_rota_para_impressao(df_input, volumoso_ids_set):
     """
-    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
+    Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia,
+    **forçando a marcação de volumoso** usando o set de IDs da Aba 1. (V34)
     
-    V33: CORREÇÃO CRÍTICA da separação de Volumosos/Não-Volumosos.
+    Recebe: 
+        1. df_input (DataFrame da rota pós-Circuit)
+        2. volumoso_ids_set (Set de IDs originais de pacotes volumosos - de st.session_state)
     """
     coluna_notes_lower = 'notes'
     
     if coluna_notes_lower not in df_input.columns:
-        # Tenta a coluna 'Notes' original do Circuit se 'notes' em lower não existir
         coluna_notes_lower = 'Notes' 
         if coluna_notes_lower not in df_input.columns:
-             # Se nem 'notes' nem 'Notes' existe, levanta o erro
              raise KeyError(f"A coluna 'Notes' ou 'notes' não foi encontrada.") 
     
     df = df_input.copy()
     df[coluna_notes_lower] = df[coluna_notes_lower].astype(str)
     df = df.dropna(subset=[coluna_notes_lower]) 
     
+    # 1. Preparação: Extrai os IDs Agrupados da Rota (Ex: '14,15*,16; Rua Nova York...') -> '14,15*,16'
+    # .str[0] pega tudo antes do primeiro ';'
+    df['ID(s) Agrupado'] = df[coluna_notes_lower].str.split(';', n=1).str[0].astype(str).str.strip().str.strip('"') 
+    
+    # Lista de IDs que originalmente ERAM volumosos (strings limpas sem *)
+    # O set contém IDs com ou sem *, então limpamos para ter a referência pura: {'123', '45'}
+    ids_volumosos_sem_asterisco = {str(id).replace('*', '').strip() for id in volumoso_ids_set}
+
+    # 2. Função para Remarcar o '*' na Rota
+    def remarcar_volumoso_v34(row):
+        ids_agrupados = row['ID(s) Agrupado']
+        
+        if pd.isna(ids_agrupados) or not ids_agrupados: 
+            return row[coluna_notes_lower], False # Retorna o note original e Não-Volumoso
+
+        # Limpa todos os '*' que já possam ter vindo e separa os IDs
+        # Ex: '14,15*,16' -> ['14', '15', '16']
+        ids_lista = [id.strip().replace('*', '') for id in ids_agrupados.split(',')]
+        ids_remarcados = []
+        is_volumoso_parada = False
+        
+        # Remarcação
+        for id_limpo in ids_lista:
+            # Checa se o ID Limpo (sem *) está no set de IDs volumosos originais
+            if id_limpo in ids_volumosos_sem_asterisco:
+                ids_remarcados.append(f"{id_limpo}*") # Re-insere o *
+                is_volumoso_parada = True # Marca a parada como volumosa
+            else:
+                ids_remarcados.append(id_limpo) # Mantém sem *
+        
+        # Reconstrução da coluna 'Notes' (IDs corrigidos + Anotação)
+        nova_string_ids = ','.join(ids_remarcados)
+        
+        # Extrai o restante da anotação (o que vem depois do primeiro ';')
+        anotacao = ''
+        partes_notes = row[coluna_notes_lower].split(';')
+        if len(partes_notes) > 1:
+            # Reconstroi o restante, incluindo o ';'
+            anotacao = ';' + ';'.join(partes_notes[1:])
+        
+        # Constrói a nova coluna 'Notes Corrigida'
+        nova_notes = f"{nova_string_ids}{anotacao}"
+        
+        return nova_notes, is_volumoso_parada
+        
+    # 3. Aplica a função de remarcação
+    try:
+        remarcacao_results = df.apply(remarcar_volumoso_v34, axis=1, result_type='expand')
+    except Exception as e:
+        st.error(f"Erro ao aplicar a correção de volumosos na coluna 'Notes'. Verifique o formato do ID. Erro: {e}")
+        return None, None, None
+        
+    df['Notes Corrigida'] = remarcacao_results[0]
+    df['É Volumoso'] = remarcacao_results[1]
+    
+    # 4. Cria a coluna final de impressão usando a 'Notes Corrigida'
     # Coluna "Ordem ID" é o primeiro campo antes do ';'
-    df_split = df[coluna_notes_lower].str.split(';', n=1, expand=True)
+    df_split_corrected = df['Notes Corrigida'].str.split(';', n=1, expand=True)
     
-    # 1. Tira as aspas extras, se houver, e tira espaços
-    df['Ordem ID'] = df_split[0].astype(str).str.strip().str.strip('"') 
-    df['Anotações Completas'] = df_split[1].astype(str).str.strip().str.strip('"') if 1 in df_split.columns else ""
+    # A coluna Ordem ID agora está com os * (corrigidos)
+    df['Ordem ID'] = df_split_corrected[0].astype(str).str.strip().str.strip('"') 
+    df['Anotações Completas'] = df_split_corrected[1].astype(str).str.strip().str.strip('"').fillna("")
     
-    # DataFrame GERAL (Para Cópia e Download)
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
         df['Anotações Completas'].astype(str)
     )
     
-    # DataFrame FINAL GERAL
+    # 5. Separação Final
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
-    # =========================================================================
-    # 1. FILTRAR VOLUMOSOS (CORREÇÃO V33: Qualquer linha que contenha '*')
-    # =========================================================================
+    # df_volumosos: Paradas onde 'É Volumoso' é True (puros ou mistos)
+    df_volumosos_impressao = df[df['É Volumoso'] == True].copy()
+    df_volumosos_impressao = df_volumosos_impressao[['Lista de Impressão', 'address']].copy()
     
-    # Usa a coluna 'Ordem ID' que contém os IDs agrupados
-    # str.contains(r'\*', regex=False) procura o caractere '*' literalmente
-    df_volumosos = df[df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy()
-    df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
+    # df_nao_volumosos: Paradas onde 'É Volumoso' é False (apenas puros não-volumosos)
+    df_nao_volumosos_impressao = df[df['É Volumoso'] == False].copy() 
+    df_nao_volumosos_impressao = df_nao_volumosos_impressao[['Lista de Impressão', 'address']].copy()
     
-    # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO V33: Apenas as linhas que não contenham '*')
-    # A lógica é: Se a parada não tem NENHUM volumoso, ela é de Não-Volumoso.
-    # O filtro de grupos mistos (que é o que o usuário quer) deve ser mais complexo,
-    # mas para a lista de impressão, o motorista precisa da lista de entregas que 
-    # NÃO PRECISAM DE MARCAÇÃO ESPECIAL (ou seja, só números puros).
-    #
-    # MUDANÇA V33: Vamos simplificar para garantir que ele pegue os não-volumosos puros.
-    # Pacote Não-Volumoso = Aquele que NÃO tem asterisco.
-    # Se for misto (ex: 121*,122), ele *NÃO* é um "Não-Volumoso Puro", mas a linha
-    # contém pacotes não-volumosos. 
-    #
-    # Vamos usar a regra mais simples para evitar erros de regex: 
-    # Não-Volumosos Puros = Paradas onde NENHUM pacote está marcado com *.
-    # Isso resolve 99% dos casos, onde o motorista precisa da lista de "pacotes normais".
-    # =========================================================================
-    
-    # Filtra as linhas que *não* contêm o caractere '*'
-    # O til (~) inverte o booleano, ou seja, pega onde NÃO contém '*'
-    df_nao_volumosos = df[~df['Ordem ID'].str.contains(r'\*', regex=False, na=False)].copy() 
-    
-    df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
-    
-    # Remove a coluna auxiliar (não existe neste fluxo, mas mantendo a limpeza)
-    # df = df.drop(columns=['Lista_IDs'], errors='ignore') # Esta coluna não é mais necessária
-
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
 
 
@@ -680,6 +711,7 @@ with tab1:
         # --- FIM ORDENAÇÃO ---
         
         def update_volumoso_ids(order_id, is_checked):
+            """Adiciona/Remove o ID (que pode conter *) do set de volumosos na session state."""
             if is_checked:
                 st.session_state['volumoso_ids'].add(order_id)
             elif order_id in st.session_state['volumoso_ids']:
@@ -754,11 +786,15 @@ with tab1:
             
             for id_volumoso in st.session_state['volumoso_ids']:
                 str_id_volumoso = str(id_volumoso)
-                df_para_processar.loc[
-                    df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
-                    COLUNA_SEQUENCE
-                ] = str_id_volumoso + '*'
-
+                
+                # Aplica o * somente se ele não estiver presente no ID original (para evitar **)
+                if '*' not in str_id_volumoso:
+                    df_para_processar.loc[
+                        df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, 
+                        COLUNA_SEQUENCE
+                    ] = str_id_volumoso + '*'
+                # Se o ID já tinha *, ele fica como está, mas o agrupamento o removerá para o Circuit
+                
             # 2. V29: PARSE ALTERNATIVE ADDRESSES FROM TEXT AREA
             alt_address_text = st.session_state.get('text_area_alt_address', '')
             df_alt_address = parse_alternative_addresses(alt_address_text)
@@ -840,8 +876,8 @@ with tab1:
 # ----------------------------------------------------------------------------------
 
 with tab2:
-    st.header("2. Limpar Saída do Circuit para Impressão")
-    st.warning("⚠️ Atenção: Use o arquivo CSV/Excel que foi gerado *após a conversão* do PDF da rota do Circuit.")
+    st.header("2. Limpar Saída do Circuit para Impressão (Correção V34)")
+    st.warning("⚠️ **Atenção:** A correção de volumosos na V34 usa o set de IDs que você marcou na Aba 1.")
 
     st.markdown("---")
     st.subheader("2.1 Carregar Arquivo da Rota")
@@ -889,12 +925,34 @@ with tab2:
             
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V33 APLICADA AQUI)
-            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
+            st.markdown("---")
+            st.subheader("2.2 Iniciar Processamento e Correção de Volumosos")
+            
+            # ------------------------------------------------------------------------
+            # V34: NOVO BLOCO - CORREÇÃO DE VOLUMOSOS PELA SESSÃO
+            # ------------------------------------------------------------------------
+            # 1. Garante que a lista de IDs Volumosos esteja acessível
+            if 'volumoso_ids' not in st.session_state:
+                st.session_state['volumoso_ids'] = set()
+                
+            volumoso_ids_para_correcao = st.session_state['volumoso_ids'].copy()
+            
+            # 2. Aviso se a lista de controle estiver vazia
+            if not volumoso_ids_para_correcao and len(st.session_state.get('df_original', [])) > 0:
+                st.warning("⚠️ **Atenção:** A lista de IDs Volumosos da Aba 1 está vazia. Certifique-se de que você marcou os pacotes volumosos na Aba 1 antes de executar esta etapa.")
+            
+            
+            # 3. CHAMA A FUNÇÃO DE PROCESSAMENTO (V34: Aplica a correção forçada de volumosos)
+            with st.spinner('Aplicando correção forçada de volumosos e separando listas...'):
+                 df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(
+                     df_input_pos,
+                     volumoso_ids_para_correcao # PASSANDO O SET DE IDS DA ABA 1
+                 )
+            # ------------------------------------------------------------------------
+
             
             if df_final_geral is not None and not df_final_geral.empty:
-                st.markdown("---")
-                st.subheader("2.2 Resultado Final (Lista de Impressão GERAL)")
+                
                 st.caption("A tabela abaixo é apenas para visualização. Use a área de texto ou o download para cópia rápida.")
                 
                 df_visualizacao_geral = df_final_geral.copy()
@@ -919,7 +977,7 @@ with tab2:
                     copia_data_nao_volumosos = '\n'.join(df_nao_volumosos_impressao['Lista de Impressão'].astype(str).tolist())
                     
                 else:
-                    st.info("Nenhum pacote não-volumoso puro encontrado nesta rota (todos os pedidos são volumosos, ou estão em grupos mistos, ou a lista está vazia).")
+                    st.info("Nenhum pacote não-volumoso puro encontrado nesta rota.")
                     
                 # --- SEÇÃO DEDICADA AOS VOLUMOSOS ---
                 st.markdown("---")

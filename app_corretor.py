@@ -422,13 +422,40 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
 # ===============================================
 
+# 💡 CORREÇÃO FINAL: Função explícita de verificação de não-volumosos
+def is_not_purely_volumous(ids_string):
+    """
+    Retorna True se houver PELO MENOS UM ID que não termina com '*'.
+    Retorna False se todos os IDs terminarem com '*' (puro volumoso).
+    """
+    if pd.isna(ids_string) or not ids_string:
+        return False
+        
+    # 1. Trata a string de IDs (remove espaços e divide por vírgula)
+    ids = [
+        i.strip() 
+        for i in str(ids_string).replace(' ', '').split(',') 
+        if i.strip()
+    ]
+    
+    if not ids:
+        return False # Nenhuma ID encontrada, não é para incluir
+
+    # 2. Verifica se algum ID NÃO termina com '*'
+    for id_pacote in ids:
+        # Se o ID NÃO terminar com '*', é um Não-Volumoso ou Misto.
+        if not id_pacote.endswith('*'):
+            return True # INCLUIR
+    
+    # Se chegou aqui, todos os IDs terminam com '*'.
+    return False # EXCLUIR (Puro Volumoso)
+
+
 def processar_rota_para_impressao(df_input):
     """
     Processa o DataFrame da rota, extrai 'Ordem ID' da coluna 'Notes' e prepara para cópia.
     
-    V26: CORREÇÃO CRÍTICA do filtro de Volumosos/Não-Volumosos.
-         Isola o ID do pacote do endereço usando o hífen ('-') como delimitador
-         para evitar que o número da casa contamine a identificação do pacote volumoso.
+    V27: CORREÇÃO CRÍTICA do filtro de Volumosos/Não-Volumosos usando a função explícita.
     """
     coluna_notes_lower = 'notes'
     
@@ -446,10 +473,11 @@ def processar_rota_para_impressao(df_input):
     df['Ordem ID'] = df_split[0].str.strip() # IDs Agrupados + (possível endereço se for PDF convertido)
     
     # -------------------------------------------------------------------------
-    # 2. NOVO TRATAMENTO CRÍTICO (ISOLAMENTO DO ID PELO HÍFEN)
+    # 2. TRATAMENTO CRÍTICO (ISOLAMENTO DO ID PELO HÍFEN)
     # Cria a coluna limpa que será usada APENAS para o filtro de volumosos.
     # Ex: "117* - Rua das Tulipas" -> ID_Pacote_Limpo = "117*"
     # -------------------------------------------------------------------------
+    # Filtra até o primeiro hífen
     df['ID_Pacote_Limpo'] = df['Ordem ID'].str.split('-', n=1, expand=True)[0].str.strip()
     
     # O campo 'Ordem ID' (originalmente o Bruto) é mantido para compatibilidade,
@@ -463,25 +491,26 @@ def processar_rota_para_impressao(df_input):
         df['Anotações Completas'].astype(str)
     )
     
-    # O filtro agora aponta para a coluna LIMPA: 'ID_Pacote_Limpo'.
-    coluna_filtro = 'ID_Pacote_Limpo'
+    coluna_filtro = 'ID_Pacote_Limpo' # Esta é a coluna que será filtrada
     
     # DataFrame FINAL GERAL
     df_final_geral = df[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 1. FILTRAR VOLUMOSOS (AGORA USANDO O ID LIMPO)
+    # 1. FILTRAR VOLUMOSOS 
     # Critério: O agrupamento contém PELO MENOS UM item com '*'
     # =========================================================================
     df_volumosos = df[df[coluna_filtro].str.contains(r'\*', regex=True, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (AGORA USANDO O ID LIMPO)
-    # Critério V25 (CORRIGIDO): O agrupamento contém PELO MENOS UM item SEM '*'
-    # Regex: '\d+(?!\*)' procura por um número (\d+) que NÃO é seguido imediatamente por um '*' ((?!\*))
+    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO APLICADA AQUI!)
+    # Critério: O agrupamento NÃO é PURAMENTE VOLUMOSO (usa a nova função)
     # =========================================================================
-    df_nao_volumosos = df[df[coluna_filtro].str.contains(r'\d+(?!\*)', regex=True, na=False)].copy() 
+    df_nao_volumosos = df[
+        df[coluna_filtro].apply(is_not_purely_volumous)
+    ].copy() 
+    
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'address']].copy()
     
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao
@@ -742,7 +771,7 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V26 APLICADA AQUI)
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V27 APLICADA AQUI)
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
@@ -1061,7 +1090,7 @@ with tab3:
         def export_cache(df_cache):
             """Prepara o DataFrame para download em Excel."""
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            with pd.ExcelWriter(buffer, engine='openyxl') as writer:
                 # Usa as colunas exatas do cache (colunas requeridas para importação)
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)

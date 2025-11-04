@@ -54,7 +54,7 @@ COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
 
-# --- Configurações de MIME Type (CORREÇÃO DE ERRO) ---
+# --- Configurações de MIME Type ---
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 # --- Configurações de Banco de Dados ---
@@ -209,9 +209,7 @@ def import_cache_to_db(conn, uploaded_file):
         st.error(f"Erro crítico ao inserir dados no cache. Verifique se o arquivo está correto. Erro: {e}")
         return 0
         
-# ------------------------------------------------------------------
-# NOVO: FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
-# ------------------------------------------------------------------
+# FUNÇÃO PARA LIMPAR TODO O CACHE (EXCLUSÃO)
 def clear_geoloc_cache_db(conn):
     """Exclui todos os dados da tabela de cache de geolocalização."""
     
@@ -422,7 +420,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
 # ===============================================
 
-# 💡 CORREÇÃO FINAL: Função explícita de verificação de não-volumosos
+# 💡 CORREÇÃO: Função explícita de verificação de não-volumosos
 def is_not_purely_volumous(ids_string):
     """
     Retorna True se houver PELO MENOS UM ID que não termina com '*'.
@@ -504,7 +502,7 @@ def processar_rota_para_impressao(df_input):
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'address']].copy() 
     
     # =========================================================================
-    # 2. FILTRAR NÃO-VOLUMOSOS (CORREÇÃO APLICADA AQUI!)
+    # 2. FILTRAR NÃO-VOLUMOSOS (Lógica de correção aplicada)
     # Critério: O agrupamento NÃO é PURAMENTE VOLUMOSO (usa a nova função)
     # =========================================================================
     df_nao_volumosos = df[
@@ -610,8 +608,7 @@ with tab1:
         st.info("A lista abaixo está ordenada corretamente pela Sequence (1, 2, 3, ...)")
 
         # -------------------------------------------------------------------------------------
-        # 💡 BLOCO DE CORREÇÃO DO LAYOUT V24 (SOLUÇÃO FINAL)
-        # Força o preenchimento criando 5 novas colunas a cada 5 itens
+        # BLOCO DE CORREÇÃO DO LAYOUT V24
         # -------------------------------------------------------------------------------------
         NUM_COLS = 5
         total_items = len(ordens_originais_sorted)
@@ -771,7 +768,7 @@ with tab2:
 
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros.")
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (V27 APLICADA AQUI)
+            # CHAMA A FUNÇÃO DE PROCESSAMENTO
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao = processar_rota_para_impressao(df_input_pos)
             
             if df_final_geral is not None and not df_final_geral.empty:
@@ -1076,7 +1073,7 @@ with tab3:
     st.markdown("---")
     
     
-    # --- NOVO: BACKUP E RESTAURAÇÃO ---
+    # --- BACKUP E RESTAURAÇÃO ---
     st.header("3.3 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
@@ -1087,10 +1084,12 @@ with tab3:
         st.markdown("#### 📥 Fazer Backup (Download)")
         st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
         
+        # [CORREÇÃO FINAL APLICADA AQUI]
         def export_cache(df_cache):
             """Prepara o DataFrame para download em Excel."""
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openyxl') as writer:
+            # O engine deve ser 'openpyxl' (e não 'openyxl')
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
                 # Usa as colunas exatas do cache (colunas requeridas para importação)
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)
@@ -1127,7 +1126,7 @@ with tab3:
                     import_cache_to_db(conn, uploaded_backup)
                     
     # ----------------------------------------------------------------------------------
-    # NOVO BLOCO V26: LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
+    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
     # ----------------------------------------------------------------------------------
     st.markdown("---")
     st.header("3.4 Limpar TODO o Cache de Geolocalização")

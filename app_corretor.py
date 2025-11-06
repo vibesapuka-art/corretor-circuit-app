@@ -686,8 +686,14 @@ with tab1:
                      result = None # Garante que o bloco de falha será ativado
                  
                  # O retorno é uma tupla (df_circuit, corrected_addresses)
-                 if result is not None:
+                 # 💡 CORREÇÃO ROBUSTA: Checagem explícita do formato antes de desempacotar.
+                 if isinstance(result, (list, tuple)) and len(result) == 2:
                      df_circuit, corrected_addresses = result
+                 elif result is not None:
+                     # Caso o 'result' seja um objeto de tamanho diferente de 2 (por exemplo, 1)
+                     st.error(f"❌ Erro de Desempacotamento (ValueError): A função de processamento retornou um formato inesperado. (Esperado 2 elementos, Recebido {len(result) if isinstance(result, (list, tuple)) else 'um objeto não-iterável'}).")
+                     df_circuit = None
+                     corrected_addresses = []
                  else:
                      df_circuit = None
                      corrected_addresses = []

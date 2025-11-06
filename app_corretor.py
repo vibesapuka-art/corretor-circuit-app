@@ -262,14 +262,17 @@ def get_most_common_or_empty(x):
 def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc):
     """
     Função principal que aplica a correção (usando cache 100% match) e o agrupamento.
+    
+    Retorna: (df_circuit, corrected_addresses)
     """
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
     for col in colunas_essenciais:
         if col not in df_entrada.columns:
             st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
-            return None 
+            return None, [] 
 
     df = df_entrada.copy()
+    corrected_addresses = [] # Inicializa a lista de endereços corrigidos
     
     # Preparação
     df[COLUNA_BAIRRO] = df[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
@@ -319,8 +322,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         
-        st.info(f"Cache aplicado com 100% de match (Endereço + Bairro)! **{cache_mask.sum()}** registros de geolocalização foram corrigidos automaticamente pelas suas edições no cache.")
-
+        # --- NOVO: Captura os endereços corrigidos e únicos ---
+        corrected_addresses = df.loc[cache_mask, 'Chave_Busca_Cache'].unique().tolist()
+        
         # Remove colunas auxiliares
         df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
@@ -338,7 +342,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     if total_unicos == 0:
         progresso_bar.empty()
         st.warning("Nenhum endereço encontrado para processar.")
-        return None
+        return None, []
     
     for i, end_principal in enumerate(enderecos_unicos):
         if end_principal not in mapa_correcao:
@@ -414,7 +418,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Notes': notas_completas
     }) 
     
-    return df_circuit
+    return df_circuit, corrected_addresses # RETORNA AGORA O DF E A LISTA DE CORRIGIDOS
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
@@ -674,12 +678,34 @@ with tab1:
 
             # 3. Iniciar o processamento e agrupamento
             with st.spinner('Aplicando cache 100% match e processando dados...'):
-                 df_circuit = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+                 result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+                 
+                 # O retorno é uma tupla (df_circuit, corrected_addresses)
+                 if result is not None:
+                     df_circuit, corrected_addresses = result
+                 else:
+                     df_circuit = None
+                     corrected_addresses = []
             
             if df_circuit is not None:
                 
                 st.markdown("---")
                 st.header("✅ Resultado Concluído!")
+                
+                # --- NOVO: Exibir endereços corrigidos do cache ---
+                if corrected_addresses:
+                    st.success(f"Cache de Geolocalização Aplicado! **{len(corrected_addresses)}** endereços únicos foram corrigidos (100% Match):")
+                    
+                    # Converte a lista para um formato Markdown
+                    corrected_text = '\n'.join([f"- {addr}" for addr in corrected_addresses])
+                    
+                    # Usa um expander para exibir a lista
+                    with st.expander("Clique para ver a lista completa de endereços corrigidos pelo cache"):
+                         st.markdown(corrected_text)
+                else:
+                    st.info("Nenhuma correção de geolocalização foi aplicada pelo cache nesta planilha (100% Match).")
+                
+                # --- FIM DO NOVO BLOCO ---
                 
                 total_entradas = len(st.session_state['df_original'])
                 total_agrupados = len(df_circuit)

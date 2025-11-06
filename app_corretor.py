@@ -323,7 +323,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         
         # --- NOVO: Captura os endereços corrigidos e únicos ---
-        corrected_addresses = df.loc[cache_mask, 'Chave_Busca_Cache'].unique().tolist()
+        # A lista deve conter o endereço *como ele foi salvo* no cache, que é a 'Chave_Cache_DB'
+        corrected_addresses = df.loc[cache_mask, 'Chave_Cache_DB'].unique().tolist()
         
         # Remove colunas auxiliares
         df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
@@ -449,8 +450,8 @@ def is_not_purely_volumous(ids_string):
         if not id_pacote.endswith('*'):
             return True # INCLUIR
     
-    # Se chegou aqui, todos os IDs terminam com '*'.
-    return False # EXCLUIR (Puro Volumoso)
+    # Se chegou aqui, todos os IDs terminam com '*' (Puro Volumoso).
+    return False # EXCLUIR 
 
 
 def processar_rota_para_impressao(df_input):
@@ -677,20 +678,21 @@ with tab1:
             df_cache = load_geoloc_cache(conn)
 
             # 3. Iniciar o processamento e agrupamento
+            result = None 
             with st.spinner('Aplicando cache 100% match e processando dados...'):
                  try:
+                     # A função retorna (df_circuit, corrected_addresses)
                      result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
                  except Exception as e:
-                     # 💡 CORREÇÃO: Captura exceções não tratadas na função e garante retorno seguro.
+                     # Captura exceções não tratadas na função e garante retorno seguro.
                      st.error(f"Erro Crítico durante a correção e agrupamento: {e}")
-                     result = None # Garante que o bloco de falha será ativado
+                     result = None 
                  
-                 # O retorno é uma tupla (df_circuit, corrected_addresses)
-                 # 💡 CORREÇÃO ROBUSTA: Checagem explícita do formato antes de desempacotar.
+                 # Checagem explícita do formato antes de desempacotar.
                  if isinstance(result, (list, tuple)) and len(result) == 2:
                      df_circuit, corrected_addresses = result
                  elif result is not None:
-                     # Caso o 'result' seja um objeto de tamanho diferente de 2 (por exemplo, 1)
+                     # Erro de desempacotamento
                      st.error(f"❌ Erro de Desempacotamento (ValueError): A função de processamento retornou um formato inesperado. (Esperado 2 elementos, Recebido {len(result) if isinstance(result, (list, tuple)) else 'um objeto não-iterável'}).")
                      df_circuit = None
                      corrected_addresses = []
@@ -703,14 +705,15 @@ with tab1:
                 st.markdown("---")
                 st.header("✅ Resultado Concluído!")
                 
-                # --- NOVO: Exibir endereços corrigidos do cache ---
+                # --- NOVO BLOCO SOLICITADO: Exibir endereços corrigidos do cache ---
                 if corrected_addresses:
+                    # Mensagem de sucesso (com o número de correções)
                     st.success(f"Cache de Geolocalização Aplicado! **{len(corrected_addresses)}** endereços únicos foram corrigidos (100% Match):")
                     
-                    # Converte a lista para um formato Markdown
+                    # Converte a lista para um formato Markdown em lista
                     corrected_text = '\n'.join([f"- {addr}" for addr in corrected_addresses])
                     
-                    # Usa um expander para exibir a lista
+                    # Usa um expander para exibir a lista completa de forma organizada
                     with st.expander("Clique para ver a lista completa de endereços corrigidos pelo cache"):
                          st.markdown(corrected_text)
                 else:
@@ -1121,11 +1124,10 @@ with tab3:
         st.markdown("#### 📥 Fazer Backup (Download)")
         st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
         
-        # [CORREÇÃO FINAL APLICADA AQUI]
         def export_cache(df_cache):
             """Prepara o DataFrame para download em Excel."""
             buffer = io.BytesIO()
-            # O engine deve ser 'openpyxl' (e não 'openyxl')
+            # O engine deve ser 'openpyxl' 
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
                 # Usa as colunas exatas do cache (colunas requeridas para importação)
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')

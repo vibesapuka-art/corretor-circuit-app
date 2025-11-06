@@ -678,7 +678,12 @@ with tab1:
 
             # 3. Iniciar o processamento e agrupamento
             with st.spinner('Aplicando cache 100% match e processando dados...'):
-                 result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+                 try:
+                     result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+                 except Exception as e:
+                     # 💡 CORREÇÃO: Captura exceções não tratadas na função e garante retorno seguro.
+                     st.error(f"Erro Crítico durante a correção e agrupamento: {e}")
+                     result = None # Garante que o bloco de falha será ativado
                  
                  # O retorno é uma tupla (df_circuit, corrected_addresses)
                  if result is not None:

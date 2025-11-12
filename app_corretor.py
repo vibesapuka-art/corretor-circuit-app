@@ -737,14 +737,18 @@ with tab_split:
             rotas_divididas = split_dataframe_for_drivers(df_rota_para_split, num_motoristas)
             
             st.markdown("---")
-            st.header("✅ Downloads Individuais")
-            st.success("O arquivo agrupado foi dividido. Clique no botão de download para obter o arquivo individual de cada motorista.")
+            st.header("✅ Lista e Downloads Individuais")
+            st.success("O arquivo agrupado foi dividido. Visualize a lista de paradas e baixe o arquivo exclusivo de cada motorista.")
             
-            # --- Container para Downloads em Colunas ---
-            num_cols = 3 
-            cols = st.columns(num_cols)
+            # --- Container para visualização e downloads ---
             
             for i, (nome_rota, df_rota) in enumerate(rotas_divididas.items()):
+                
+                st.markdown("___")
+                st.subheader(f"Lista para {nome_rota}")
+                
+                # Exibe a lista (DataFrame)
+                st.dataframe(df_rota, use_container_width=True)
                 
                 # Prepara o arquivo Excel individual
                 buffer_individual = io.BytesIO()
@@ -754,22 +758,16 @@ with tab_split:
                     
                 buffer_individual.seek(0)
                 
-                # Exibe o botão de download na coluna apropriada
-                col_index = i % num_cols
-                with cols[col_index]:
-                    
-                    st.subheader(nome_rota)
-                    
-                    file_name = f"Circuit_Rota_{i+1}_{len(df_rota)}_Paradas.xlsx"
-                    
-                    st.download_button(
-                        label=f"⬇️ Baixar Rota {i+1} ({len(df_rota)} Paradas)",
-                        data=buffer_individual,
-                        file_name=file_name,
-                        mime=EXCEL_MIME_TYPE, 
-                        key=f"download_split_{i+1}"
-                    )
-                    st.caption("Pronto para importar!")
+                file_name = f"Circuit_Rota_{i+1}_{len(df_rota)}_Paradas.xlsx"
+                
+                # Exibe o botão de download
+                st.download_button(
+                    label=f"⬇️ Baixar Arquivo de Importação para {nome_rota}",
+                    data=buffer_individual,
+                    file_name=file_name,
+                    mime=EXCEL_MIME_TYPE, 
+                    key=f"download_split_{i+1}"
+                )
             
             st.markdown("---")
             st.info("Cada arquivo baixado contém a lista de paradas na ordem sequencial, com coordenadas, para ser otimizada individualmente no Circuit/Spoke.")

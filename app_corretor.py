@@ -361,9 +361,6 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
     COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes']
     df_export = df_circuit[['Sequence_Base'] + COLUNAS_EXPORT_SPLIT].copy()
     
-    # O Circuit lê 'Order ID' e 'Notes', mas como estamos na pré, 
-    # as colunas Latitude e Longitude são cruciais.
-    # Vamos usar 'Notes' como o Order ID/Notes para simplificar.
     df_export.rename(columns={'Notes': 'Notes', 'Address': 'Address'}, inplace=True)
     
     total_paradas = len(df_export)
@@ -384,8 +381,7 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         
         df_motorista = df_export.iloc[start_index:end_index].copy()
         
-        # O nome da coluna 'Order ID' é opcional, mas vamos mantê-lo para o Circuit
-        # Usaremos 'Notes' para preencher Order ID, já que ele contém os IDs agrupados
+        # Insere 'Order ID' antes de 'Address' para o formato Circuit/Spoke
         df_motorista.insert(1, 'Order ID', df_motorista['Notes'].apply(lambda x: str(x).split(';')[0].strip()))
         
         # Remove a coluna 'Sequence_Base' antes de exportar
@@ -710,12 +706,12 @@ with tab1:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS) - AGORA PRÉ-ROTEIRIZAÇÃO
+# ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS) - AGORA PRÉ-ROTEIRIZAÇÃO COM DOWNLOADS INDIVIDUAIS
 # ----------------------------------------------------------------------------------
 
 with tab_split:
-    st.header("✂️ Dividir Rota PRÉ-Roteirização (Com Coordenadas)")
-    st.caption("A divisão será feita no arquivo agrupado da Pré-Roteirização. Cada motorista receberá sua parte com Lat/Lon para otimizar *individualmente* no Circuit.")
+    st.header("✂️ Dividir Rota PRÉ-Roteirização (Downloads Individuais)")
+    st.caption("A divisão é feita no arquivo agrupado. Baixe um arquivo **individual** para cada motorista.")
     
     st.markdown("---")
     
@@ -736,41 +732,47 @@ with tab_split:
             key="num_motoristas_split_pre"
         )
         
-        if st.button(f"➡️ Dividir em {num_motoristas} Rotas Sequenciais para Motoristas", key="btn_split_route_pre"):
+        if st.button(f"➡️ Dividir e Gerar Botões de Download Individual", key="btn_split_route_pre"):
             
             rotas_divididas = split_dataframe_for_drivers(df_rota_para_split, num_motoristas)
             
             st.markdown("---")
-            st.header("✅ Resultado da Divisão")
-            st.success("O arquivo agrupado foi dividido equitativamente. Cada Motorista deve importar **sua aba** no Circuit para otimizar a rota.")
+            st.header("✅ Downloads Individuais")
+            st.success("O arquivo agrupado foi dividido. Clique no botão de download para obter o arquivo individual de cada motorista.")
             
-            # Prepara o arquivo Excel com todas as abas
-            buffer_split = io.BytesIO()
-            with pd.ExcelWriter(buffer_split, engine='openpyxl') as writer:
+            # --- Container para Downloads em Colunas ---
+            num_cols = 3 
+            cols = st.columns(num_cols)
+            
+            for i, (nome_rota, df_rota) in enumerate(rotas_divididas.items()):
                 
-                for nome_rota, df_rota in rotas_divididas.items():
-                    # Garante um nome de aba válido
-                    sheet_name = nome_rota.replace(" ", "_").replace("(", "").replace(")", "").replace(":", "")[:31]
+                # Prepara o arquivo Excel individual
+                buffer_individual = io.BytesIO()
+                with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
+                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
+                    df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
-                    # O df_rota já contém 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
-                    df_rota.to_excel(writer, index=False, sheet_name=sheet_name)
+                buffer_individual.seek(0)
+                
+                # Exibe o botão de download na coluna apropriada
+                col_index = i % num_cols
+                with cols[col_index]:
                     
-                    st.subheader(f"Rota para {nome_rota}")
-                    # Mostra as colunas principais para visualização
-                    st.dataframe(df_rota, use_container_width=True)
+                    st.subheader(nome_rota)
                     
-            buffer_split.seek(0)
-
-            # Botão de Download
-            st.download_button(
-                label=f"📥 Baixar Arquivo de Rotas Divididas ({num_motoristas} Abas)",
-                data=buffer_split,
-                file_name=f"Circuit_Rotas_Split_PRE_OTIMIZACAO_{num_motoristas}_DRIVERS.xlsx",
-                mime=EXCEL_MIME_TYPE, 
-                key="download_split_routes_pre"
-            )
+                    file_name = f"Circuit_Rota_{i+1}_{len(df_rota)}_Paradas.xlsx"
+                    
+                    st.download_button(
+                        label=f"⬇️ Baixar Rota {i+1} ({len(df_rota)} Paradas)",
+                        data=buffer_individual,
+                        file_name=file_name,
+                        mime=EXCEL_MIME_TYPE, 
+                        key=f"download_split_{i+1}"
+                    )
+                    st.caption("Pronto para importar!")
             
-            st.info("Cada aba (Motorista 1, Motorista 2, etc.) deve ser importada individualmente no Circuit para otimização.")
+            st.markdown("---")
+            st.info("Cada arquivo baixado contém a lista de paradas na ordem sequencial, com coordenadas, para ser otimizada individualmente no Circuit/Spoke.")
 
     else:
         st.warning("⚠️ **Etapa Pendente:** Por favor, vá para a aba **🚀 Pré-Roteirização** e clique em '🚀 Iniciar Corretor e Agrupamento' primeiro. O arquivo agrupado será carregado aqui automaticamente.")

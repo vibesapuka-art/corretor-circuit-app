@@ -421,6 +421,53 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     
     return df_circuit, corrected_addresses # RETORNA AGORA O DF E A LISTA DE CORRIGIDOS
 
+
+# ===============================================
+# FUNÇÃO DE SPLIT DE ROTAS
+# ===============================================
+
+def split_dataframe_for_drivers(df_circuit, num_motoristas):
+    """
+    Divide o DataFrame de saída do Circuit em N DataFrames para N motoristas,
+    distribuindo as paradas de forma mais equitativa possível.
+    """
+    if df_circuit is None or df_circuit.empty:
+        return {}
+    
+    total_paradas = len(df_circuit)
+    
+    if num_motoristas <= 0:
+        return {} # Retorna vazio se o número for inválido
+    
+    # Número de paradas que cada motorista receberá
+    paradas_base = total_paradas // num_motoristas
+    
+    # Paradas que sobram para serem distribuídas (Motorista 1, Motorista 2, ...)
+    restante = total_paradas % num_motoristas
+    
+    # Dicionário para armazenar as rotas divididas
+    rotas_divididas = {}
+    
+    start_index = 0
+    
+    for i in range(num_motoristas):
+        # O primeiro 'restante' de motoristas recebe uma parada a mais
+        paradas_motorista = paradas_base + (1 if i < restante else 0)
+        
+        end_index = start_index + paradas_motorista
+        
+        # Seleciona o chunk
+        df_motorista = df_circuit.iloc[start_index:end_index].copy()
+        
+        # Adiciona ao dicionário com o nome do motorista
+        rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
+        
+        # Atualiza o índice inicial para o próximo motorista
+        start_index = end_index
+        
+    return rotas_divididas
+
+
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
 # ===============================================
@@ -529,8 +576,8 @@ create_table_if_not_exists(conn)
 
 st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
-# CRIAÇÃO DAS ABAS 
-tab1, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
+# CRIAÇÃO DAS ABAS (NOVA ABA: tab_split)
+tab1, tab_split, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "✂️ Split Route (Dividir)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
 
 
 # ----------------------------------------------------------------------------------
@@ -546,6 +593,8 @@ with tab1:
         st.session_state['df_original'] = None
     if 'volumoso_ids' not in st.session_state:
         st.session_state['volumoso_ids'] = set() 
+    if 'df_circuit_agrupado' not in st.session_state: # NOVO STATE
+        st.session_state['df_circuit_agrupado'] = None
     
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -573,6 +622,7 @@ with tab1:
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
+                 st.session_state['df_circuit_agrupado'] = None # Limpa a rota agrupada anterior
 
 
             st.session_state['df_original'] = df_input_pre.copy()
@@ -581,6 +631,7 @@ with tab1:
         except KeyError as ke:
              st.error(f"Erro de Coluna: {ke}")
              st.session_state['df_original'] = None
+             st.session_state['df_circuit_agrupado'] = None
         except Exception as e:
             st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
 
@@ -701,6 +752,8 @@ with tab1:
                      corrected_addresses = []
             
             if df_circuit is not None:
+                # SALVA O DF NA SESSION_STATE PARA SER USADO NA NOVA ABA
+                st.session_state['df_circuit_agrupado'] = df_circuit
                 
                 st.markdown("---")
                 st.header("✅ Resultado Concluído!")
@@ -758,6 +811,71 @@ with tab1:
                     mime=EXCEL_MIME_TYPE, # Usando a variável global
                     key="download_excel_circuit"
                 )
+                
+                st.markdown("---")
+                st.info("Agora, você pode ir para a aba **✂️ Split Route** para dividir esta rota.")
+
+
+# ----------------------------------------------------------------------------------
+# ABA 1.5 (NOVA): SPLIT ROUTE (DIVIDIR ROTAS)
+# ----------------------------------------------------------------------------------
+
+with tab_split:
+    st.header("✂️ Dividir Rota Agrupada entre Motoristas")
+    st.caption("Divide a rota agrupada da aba 'Pré-Roteirização' em **N** partes iguais (em número de paradas).")
+    
+    df_agrupado_split = st.session_state.get('df_circuit_agrupado')
+    
+    st.markdown("---")
+    
+    if df_agrupado_split is None:
+        st.warning("⚠️ **Nenhuma rota agrupada encontrada!** Por favor, processe a planilha na aba '🚀 Pré-Roteirização' primeiro.")
+    else:
+        total_paradas = len(df_agrupado_split)
+        st.info(f"Rota Agrupada Carregada: **{total_paradas} paradas** únicas.")
+        
+        st.subheader("Configurar Divisão")
+        
+        num_motoristas = st.slider(
+            'Número de Motoristas para Divisão:',
+            min_value=2,
+            max_value=5, # Limite o slider a um número razoável
+            value=2,
+            step=1,
+            key="num_motoristas_split"
+        )
+        
+        if st.button(f"➡️ Dividir em {num_motoristas} Rotas", key="btn_split_route"):
+            
+            rotas_divididas = split_dataframe_for_drivers(df_agrupado_split, num_motoristas)
+            
+            st.markdown("---")
+            st.header("✅ Resultado da Divisão")
+            
+            # Prepara o arquivo Excel com todas as abas
+            buffer_split = io.BytesIO()
+            with pd.ExcelWriter(buffer_split, engine='openpyxl') as writer:
+                
+                for nome_rota, df_rota in rotas_divididas.items():
+                    # Garante que o nome da aba não exceda o limite do Excel (31 caracteres)
+                    sheet_name = nome_rota.replace(" ", "_")[:31]
+                    df_rota.to_excel(writer, index=False, sheet_name=sheet_name)
+                    
+                    st.subheader(f"Rota para {nome_rota}")
+                    st.dataframe(df_rota, use_container_width=True)
+                    
+            buffer_split.seek(0)
+
+            # Botão de Download
+            st.download_button(
+                label=f"📥 Baixar Arquivo de Rotas Divididas ({num_motoristas} Abas)",
+                data=buffer_split,
+                file_name=f"Circuit_Rotas_Split_{num_motoristas}_DRIVERS.xlsx",
+                mime=EXCEL_MIME_TYPE, 
+                key="download_split_routes"
+            )
+            
+            st.success("O arquivo Excel contém uma aba para cada motorista, pronta para ser importada individualmente no Circuit.")
 
 
 # ----------------------------------------------------------------------------------
@@ -945,10 +1063,10 @@ with tab2:
 def clear_lat_lon_fields():
     """Limpa os campos de Latitude/Longitude e o campo de colar coordenadas."""
     # O Streamlit guarda o valor no session_state, então precisamos resetá-lo
-    if 'form_new_lat' in st.session_state:
-        st.session_state['form_new_lat'] = ""
-    if 'form_new_lon' in st.session_state:
-        st.session_state['form_new_lon'] = ""
+    if 'form_new_lat_num' in st.session_state:
+        st.session_state['form_new_lat_num'] = 0.0 # Reseta para o valor padrão do number_input
+    if 'form_new_lon_num' in st.session_state:
+        st.session_state['form_new_lon_num'] = 0.0 # Reseta para o valor padrão do number_input
     if 'form_colar_coord' in st.session_state:
         st.session_state['form_colar_coord'] = ""
     if 'form_new_endereco' in st.session_state:
@@ -975,9 +1093,9 @@ def apply_google_coords():
             lat = float(matches[0].replace(',', '.'))
             lon = float(matches[1].replace(',', '.'))
             
-            # Atualiza a session state dos campos Lat e Lon para exibição
-            st.session_state['form_new_lat'] = str(lat)
-            st.session_state['form_new_lon'] = str(lon)
+            # Atualiza a session state dos number_input para exibição
+            st.session_state['form_new_lat_num'] = lat
+            st.session_state['form_new_lon_num'] = lon
             st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
             return
             
@@ -990,8 +1108,8 @@ def apply_google_coords():
                 lat = float(parts[0].replace(',', '.').strip()) 
                 lon = float(parts[1].replace(',', '.').strip())
                 
-                st.session_state['form_new_lat'] = str(lat)
-                st.session_state['form_new_lon'] = str(lon)
+                st.session_state['form_new_lat_num'] = lat
+                st.session_state['form_new_lon_num'] = lon
                 st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
                 return
              except ValueError:
@@ -1039,7 +1157,7 @@ with tab3:
             st.text_input(
                 "2. Colar Coordenadas Google (Ex: -23,5139753, -52,1131268)",
                 key="form_colar_coord",
-                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth. O sistema converterá vírgula decimal para ponto."
+                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth. O sistema converterá vírgula decimal para ponto e aplicará abaixo."
             )
         with col_btn_coord:
             st.markdown("##") # Espaço para alinhar o botão
@@ -1047,24 +1165,37 @@ with tab3:
                 "Aplicar Coordenadas", 
                 on_click=apply_google_coords,
                 key="btn_apply_coord",
-                help="Clique para extrair Latitude e Longitude da caixa de texto acima."
+                help="Clique para extrair Latitude e Longitude da caixa de texto acima e preencher nos campos 3 e 4."
             )
         
         st.caption("--- OU preencha ou ajuste manualmente (deve usar PONTO como separador decimal para evitar erros) ---")
 
         col_lat, col_lon = st.columns(2)
         
-        # Inicializa se não existir
-        if 'form_new_lat' not in st.session_state:
-            st.session_state['form_new_lat'] = ""
-        if 'form_new_lon' not in st.session_state:
-            st.session_state['form_new_lon'] = ""
+        # Inicializa se não existir (AGORA USA FLOAT PADRÃO PARA number_input)
+        if 'form_new_lat_num' not in st.session_state:
+            st.session_state['form_new_lat_num'] = 0.0
+        if 'form_new_lon_num' not in st.session_state:
+            st.session_state['form_new_lon_num'] = 0.0
             
         with col_lat:
-            # Mantém os valores da session state para permitir o preenchimento automático
-            new_latitude = st.text_input("3. Latitude Corrigida", key="form_new_lat")
+            # Novo: Usando st.number_input para forçar o formato numérico e evitar erro de vírgula
+            new_latitude = st.number_input(
+                "3. Latitude Corrigida", 
+                value=st.session_state['form_new_lat_num'], # Pega o valor do state
+                format="%.8f", 
+                step=0.00000001,
+                key="form_new_lat_num" 
+            )
         with col_lon:
-            new_longitude = st.text_input("4. Longitude Corrigida", key="form_new_lon")
+            # Novo: Usando st.number_input
+            new_longitude = st.number_input(
+                "4. Longitude Corrigida", 
+                value=st.session_state['form_new_lon_num'], # Pega o valor do state
+                format="%.8f", 
+                step=0.00000001,
+                key="form_new_lon_num"
+            )
             
         st.markdown("---")
         
@@ -1074,29 +1205,27 @@ with tab3:
             # Botão de salvar - AGORA DENTRO DE UM CALLBACK MANUAL
             if st.button("✅ Salvar Nova Correção no Cache", key="btn_save_quick"):
                 
-                # Garante que os valores atuais da caixa de texto sejam usados
-                lat_to_save = st.session_state.get('form_new_lat', '')
-                lon_to_save = st.session_state.get('form_new_lon', '')
+                # Pega os valores diretos do number_input (que já são float)
+                lat_to_save = st.session_state.get('form_new_lat_num') 
+                lon_to_save = st.session_state.get('form_new_lon_num')
                 
-                if not new_endereco or not lat_to_save or not lon_to_save:
-                    st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar.")
+                # Se as coordenadas forem 0.0, verifica se o usuário realmente as digitou
+                if not new_endereco or (lat_to_save == 0.0 and lon_to_save == 0.0 and st.session_state.get('form_colar_coord') == ""):
+                    st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar, ou use a ferramenta 'Aplicar Coordenadas'.")
                 else:
                     try:
                         # 1. TRATAMENTO DO ENDEREÇO: REMOVE ESPAÇOS E O ";" FINAL
                         endereco_limpo = new_endereco.strip().rstrip(';')
                         
-                        # 2. TRATAMENTO DAS COORDENADAS: Converte para float (trocando a vírgula por ponto se necessário)
-                        lat = float(str(lat_to_save).strip().replace(',', '.'))
-                        lon = float(str(lon_to_save).strip().replace(',', '.'))
+                        # 2. Chama a função de salvamento
+                        # Os valores de lat/lon são passados como float diretamente do number_input
+                        save_single_entry_to_db(conn, endereco_limpo, lat_to_save, lon_to_save)
                         
-                        # 3. Chama a função de salvamento
-                        save_single_entry_to_db(conn, endereco_limpo, lat, lon)
-                        
-                        # 4. Limpa os campos após o salvamento
+                        # 3. Limpa os campos após o salvamento
                         # O rerun irá finalizar a limpeza do endereço
                         
-                    except ValueError:
-                        st.error("Latitude e Longitude devem ser números válidos. Use ponto (.) como separador decimal, ou a ferramenta de 'Aplicar Coordenadas'.")
+                    except Exception as e:
+                        st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
         
         with clear_button_col:
              st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")
@@ -1184,3 +1313,4 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
+        

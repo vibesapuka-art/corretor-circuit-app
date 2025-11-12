@@ -322,12 +322,15 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*,', ',', regex=True)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*$', '', regex=True) 
     
+    # A coluna de Notes deve conter o Order ID e outras infos
     notas_completas = (
+        df_agrupado['Sequences_Agrupadas'] + '; ' +
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
-
+    
+    # Colunas essenciais para importação (com coordenadas)
     df_circuit = pd.DataFrame({
         'Order ID': df_agrupado['Sequences_Agrupadas'], 
         'Address': endereco_completo_circuit, 
@@ -335,6 +338,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Longitude': df_agrupado['Longitude'], 
         'Notes': notas_completas
     }) 
+    
+    # Adicionando uma coluna 'Sequence_Base' para manter a ordem de importação, se for usado o split
+    df_circuit.insert(0, 'Sequence_Base', range(1, len(df_circuit) + 1))
     
     return df_circuit, corrected_addresses 
 
@@ -345,13 +351,22 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 
 def split_dataframe_for_drivers(df_circuit, num_motoristas):
     """
-    Divide o DataFrame (já na ordem sequencial) em N DataFrames para N motoristas,
+    Divide o DataFrame (o agrupado da Pré-Roteirização) em N DataFrames,
     distribuindo as paradas de forma mais equitativa possível, MANTENDO A ORDEM.
     """
     if df_circuit is None or df_circuit.empty:
         return {}
     
-    total_paradas = len(df_circuit)
+    # Garante que as colunas essenciais para importação do Circuit estejam presentes
+    COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes']
+    df_export = df_circuit[['Sequence_Base'] + COLUNAS_EXPORT_SPLIT].copy()
+    
+    # O Circuit lê 'Order ID' e 'Notes', mas como estamos na pré, 
+    # as colunas Latitude e Longitude são cruciais.
+    # Vamos usar 'Notes' como o Order ID/Notes para simplificar.
+    df_export.rename(columns={'Notes': 'Notes', 'Address': 'Address'}, inplace=True)
+    
+    total_paradas = len(df_export)
     
     if num_motoristas <= 0:
         return {} 
@@ -367,10 +382,17 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         
         end_index = start_index + paradas_motorista
         
-        df_motorista = df_circuit.iloc[start_index:end_index].copy()
+        df_motorista = df_export.iloc[start_index:end_index].copy()
         
-        # Adiciona a coluna de Sequência de Entrega (1, 2, 3...) DENTRO DA ROTA
-        df_motorista.insert(0, 'Driver Sequence', range(1, len(df_motorista) + 1))
+        # O nome da coluna 'Order ID' é opcional, mas vamos mantê-lo para o Circuit
+        # Usaremos 'Notes' para preencher Order ID, já que ele contém os IDs agrupados
+        df_motorista.insert(1, 'Order ID', df_motorista['Notes'].apply(lambda x: str(x).split(';')[0].strip()))
+        
+        # Remove a coluna 'Sequence_Base' antes de exportar
+        df_motorista = df_motorista.drop(columns=['Sequence_Base'])
+        
+        # Colunas finais para exportação
+        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']]
         
         # Nome da Rota (com contagem de paradas)
         rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
@@ -407,29 +429,36 @@ def is_not_purely_volumous(ids_string):
 
 def processar_rota_para_impressao(df_input):
     
-    if COLUNA_NOTES_CIRCUIT not in df_input.columns:
-        # Tenta a conversão para minúsculas
-        cols_lower = [c.lower() for c in df_input.columns]
-        if COLUNA_NOTES_CIRCUIT not in cols_lower:
-            raise KeyError(f"A coluna '{COLUNA_NOTES_CIRCUIT}' não foi encontrada.") 
+    # Tenta normalizar as colunas (se estiverem em maiúsculas/minúsculas diferentes)
+    df_input.columns = df_input.columns.str.strip().str.lower()
+    
+    if COLUNA_NOTES_CIRCUIT not in df_input.columns or COLUNA_ADDRESS_CIRCUIT not in df_input.columns:
+        # A coluna 'order id' também pode ser usada se 'notes' não estiver presente
+        if 'order id' not in df_input.columns:
+            raise KeyError(f"As colunas de endereço ('{COLUNA_ADDRESS_CIRCUIT}') e notas/id ('{COLUNA_NOTES_CIRCUIT}' ou 'order id') não foram encontradas.") 
         
     df = df_input.copy()
-    # Normaliza as colunas de entrada
-    df.columns = df.columns.str.lower()
     
+    # Se 'notes' estiver faltando, mas 'order id' existir (caso de importação/exportação padrão)
+    if COLUNA_NOTES_CIRCUIT not in df.columns and 'order id' in df.columns:
+        df[COLUNA_NOTES_CIRCUIT] = df['order id'].astype(str)
+        
     df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].astype(str)
     df = df.dropna(subset=[COLUNA_NOTES_CIRCUIT]) 
     
     df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].str.strip('"')
     
     # 1. Separa o campo 'Notes' pelo PONTO E VÍRGULA
+    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | CEP: 80000000'
     df_split = df[COLUNA_NOTES_CIRCUIT].str.split(';', n=1, expand=True)
     df['Ordem ID'] = df_split[0].str.strip() 
     
-    # 2. TRATAMENTO CRÍTICO (ISOLAMENTO DO ID PELO HÍFEN)
-    df['ID_Pacote_Limpo'] = df['Ordem ID'].str.split('-', n=1, expand=True)[0].str.strip()
-    
+    # O segundo item é o restante da anotação
     df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
+    
+    # 2. TRATAMENTO CRÍTICO (ISOLAMENTO DO ID PELO HÍFEN) - NÃO É MAIS NECESSÁRIO AQUI, 
+    # POIS O ID JÁ ESTÁ LIMPO NO CAMPO 'Ordem ID'
+    df['ID_Pacote_Limpo'] = df['Ordem ID'].str.strip() 
     
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
@@ -457,10 +486,11 @@ def processar_rota_para_impressao(df_input):
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'Address_Clean']].copy()
     
     # Retorna o DF original *limpo* (com colunas normalizadas) para o Split, se necessário
-    df_limpo_para_split = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
-    df_limpo_para_split.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
+    # NOTA: df_limpo_para_split_pos não é mais usado no split, mas mantido por segurança.
+    df_limpo_para_split_pos = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
+    df_limpo_para_split_pos.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
     
-    return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, df_limpo_para_split
+    return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, df_limpo_para_split_pos
 
 
 # ===============================================
@@ -478,23 +508,27 @@ tab1, tab_split, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)"
 
 
 # ----------------------------------------------------------------------------------
+# VARIÁVEIS DE ESTADO (SESSION STATE)
+# ----------------------------------------------------------------------------------
+
+if 'df_original' not in st.session_state:
+    st.session_state['df_original'] = None
+if 'volumoso_ids' not in st.session_state:
+    st.session_state['volumoso_ids'] = set() 
+# Este é o DF agrupado e com coordenadas, pronto para o Circuit.
+if 'df_circuit_agrupado_pre' not in st.session_state: 
+    st.session_state['df_circuit_agrupado_pre'] = None
+
+
+# ----------------------------------------------------------------------------------
 # ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
 # ----------------------------------------------------------------------------------
 
 with tab1:
-    # Código da Pré-Roteirização (Mantido como estava)
-    # ...
+    
     st.header("1. Gerar Arquivo para Importar no Circuit")
     st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
-    if 'df_original' not in st.session_state:
-        st.session_state['df_original'] = None
-    if 'volumoso_ids' not in st.session_state:
-        st.session_state['volumoso_ids'] = set() 
-    # Mantenha este state, mesmo que a aba Split agora tenha um uploader próprio.
-    if 'df_circuit_agrupado_pre' not in st.session_state: 
-        st.session_state['df_circuit_agrupado_pre'] = None
-    
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
 
@@ -516,6 +550,7 @@ with tab1:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
+            # Limpa o estado se for um novo arquivo
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
@@ -648,13 +683,14 @@ with tab1:
                 ].copy()
                 
                 st.subheader("Arquivo para Roteirização (Circuit)")
-                st.dataframe(df_circuit, use_container_width=True)
+                st.dataframe(df_circuit.drop(columns=['Sequence_Base']), use_container_width=True) # Remove Sequence_Base para visualização
                 
                 buffer_circuit = io.BytesIO()
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    df_circuit.to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
+                    # Remove Sequence_Base para a importação final, pois o Circuit não precisa dela
+                    df_circuit.drop(columns=['Sequence_Base']).to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
                     if not df_volumosos_separado.empty:
-                        df_volumosos_separado.to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
+                        df_volumosos_separado.drop(columns=['Sequence_Base']).to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
                         st.info(f"O arquivo de download conterá uma aba extra com **{len(df_volumosos_separado)}** endereços que incluem pacotes volumosos.")
                     else:
                         st.info("Nenhum pacote volumoso marcado.")
@@ -662,80 +698,34 @@ with tab1:
                 buffer_circuit.seek(0)
                 
                 st.download_button(
-                    label="📥 Baixar ARQUIVO PARA CIRCUIT",
+                    label="📥 Baixar ARQUIVO GERAL PARA CIRCUIT",
                     data=buffer_circuit,
-                    file_name="Circuit_Import_FINAL_MARCADO.xlsx",
+                    file_name="Circuit_Import_FINAL_GERAL.xlsx",
                     mime=EXCEL_MIME_TYPE, 
                     key="download_excel_circuit"
                 )
                 
                 st.markdown("---")
-                st.info("Agora, roteirize este arquivo no Circuit e use o arquivo de **saída** na aba **✂️ Split Route**.")
+                st.info("Agora, você pode usar o arquivo na aba **✂️ Split Route** ou este arquivo geral no Circuit.")
 
 
 # ----------------------------------------------------------------------------------
-# ABA 1.5 (NOVA): SPLIT ROUTE (DIVIDIR ROTAS) - AGORA PÓS-ROTEIRIZAÇÃO
+# ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS) - AGORA PRÉ-ROTEIRIZAÇÃO
 # ----------------------------------------------------------------------------------
 
 with tab_split:
-    st.header("✂️ Dividir Rota Pós-Roteirização (Mantendo a Ordem)")
-    st.caption("Use o arquivo de **SAÍDA** gerado pelo Circuit após a otimização. A divisão será feita na sequência otimizada.")
+    st.header("✂️ Dividir Rota PRÉ-Roteirização (Com Coordenadas)")
+    st.caption("A divisão será feita no arquivo agrupado da Pré-Roteirização. Cada motorista receberá sua parte com Lat/Lon para otimizar *individualmente* no Circuit.")
     
     st.markdown("---")
     
-    st.subheader("1. Carregar Arquivo da Rota Otimizada (CSV/Excel)")
-    
-    uploaded_file_split = st.file_uploader(
-        "Arraste e solte o arquivo de SAÍDA do Circuit aqui (CSV/Excel):", 
-        type=['csv', 'xlsx'],
-        key="file_split_pos"
-    )
-
-    sheet_name_default_split = "Table 3" 
-    sheet_name_split = sheet_name_default_split
-    
-    df_rota_para_split = None
-    
-    if uploaded_file_split is not None and uploaded_file_split.name.endswith('.xlsx'):
-        sheet_name_split = st.text_input(
-            "Seu arquivo é um Excel (.xlsx). Digite o nome da aba com os dados da rota (ex: Table 3):", 
-            value=sheet_name_default_split,
-            key="sheet_name_input_split"
-        )
-        
-    if uploaded_file_split is not None:
-        try:
-            if uploaded_file_split.name.endswith('.csv'):
-                df_input_split = pd.read_csv(uploaded_file_split)
-            else:
-                df_input_split = pd.read_excel(uploaded_file_split, sheet_name=sheet_name_split)
-                
-            # Normalização e validação mínima (colunas Address e Notes são críticas)
-            df_input_split.columns = df_input_split.columns.str.strip().str.lower()
-            
-            if COLUNA_ADDRESS_CIRCUIT not in df_input_split.columns or COLUNA_NOTES_CIRCUIT not in df_input_split.columns:
-                 raise KeyError(f"O arquivo deve conter as colunas '{COLUNA_ADDRESS_CIRCUIT}' e '{COLUNA_NOTES_CIRCUIT}' (ou variações de maiúsculas/minúsculas).")
-                 
-            # 💡 CRIAÇÃO DO DF PARA O SPLIT:
-            # Pega as colunas Address e Notes (que contêm o Order ID)
-            df_rota_para_split = df_input_split[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
-            df_rota_para_split.columns = ['Address', 'Notes'] # Renomeia para clareza
-            
-            st.info(f"Rota otimizada carregada: **{len(df_rota_para_split)} paradas** únicas na sequência do Circuit.")
-            
-        except KeyError as ke:
-             st.error(f"Erro de Coluna/Aba: {ke}. Verifique se o nome da aba está correto e se as colunas 'address' e 'notes' existem.")
-             df_rota_para_split = None
-        except Exception as e:
-            st.error(f"Ocorreu um erro ao carregar o arquivo. Verifique o formato. Erro: {e}")
-            df_rota_para_split = None
-            
-    
-    st.markdown("---")
+    df_rota_para_split = st.session_state.get('df_circuit_agrupado_pre')
     
     if df_rota_para_split is not None and not df_rota_para_split.empty:
         
-        st.subheader("2. Configurar Divisão")
+        st.info(f"Rota agrupada carregada da Pré-Roteirização: **{len(df_rota_para_split)} paradas** únicas.")
+        
+        st.subheader("1. Configurar Divisão")
         
         num_motoristas = st.slider(
             'Número de Motoristas para Divisão:',
@@ -743,34 +733,31 @@ with tab_split:
             max_value=10, 
             value=2,
             step=1,
-            key="num_motoristas_split_pos"
+            key="num_motoristas_split_pre"
         )
         
-        if st.button(f"➡️ Dividir em {num_motoristas} Rotas Sequenciais", key="btn_split_route_pos"):
+        if st.button(f"➡️ Dividir em {num_motoristas} Rotas Sequenciais para Motoristas", key="btn_split_route_pre"):
             
             rotas_divididas = split_dataframe_for_drivers(df_rota_para_split, num_motoristas)
             
             st.markdown("---")
             st.header("✅ Resultado da Divisão")
-            st.success("A sequência otimizada pelo Circuit foi mantida e dividida equitativamente entre os motoristas.")
+            st.success("O arquivo agrupado foi dividido equitativamente. Cada Motorista deve importar **sua aba** no Circuit para otimizar a rota.")
             
             # Prepara o arquivo Excel com todas as abas
             buffer_split = io.BytesIO()
             with pd.ExcelWriter(buffer_split, engine='openpyxl') as writer:
                 
                 for nome_rota, df_rota in rotas_divididas.items():
+                    # Garante um nome de aba válido
                     sheet_name = nome_rota.replace(" ", "_").replace("(", "").replace(")", "").replace(":", "")[:31]
                     
-                    # Usa o DataFrame limpo para o download
-                    df_rota_download = df_rota[['Address', 'Notes']].copy()
-                    
-                    df_rota_download.to_excel(writer, index=False, sheet_name=sheet_name)
+                    # O df_rota já contém 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
+                    df_rota.to_excel(writer, index=False, sheet_name=sheet_name)
                     
                     st.subheader(f"Rota para {nome_rota}")
-                    # Mostra a sequência do motorista para visualização
-                    df_rota_display = df_rota.copy()
-                    df_rota_display.columns = ['Seq. Motorista', 'Endereço', 'Notes (Order ID, etc.)']
-                    st.dataframe(df_rota_display, use_container_width=True)
+                    # Mostra as colunas principais para visualização
+                    st.dataframe(df_rota, use_container_width=True)
                     
             buffer_split.seek(0)
 
@@ -778,19 +765,20 @@ with tab_split:
             st.download_button(
                 label=f"📥 Baixar Arquivo de Rotas Divididas ({num_motoristas} Abas)",
                 data=buffer_split,
-                file_name=f"Circuit_Rotas_Split_OTIMIZADAS_{num_motoristas}_DRIVERS.xlsx",
+                file_name=f"Circuit_Rotas_Split_PRE_OTIMIZACAO_{num_motoristas}_DRIVERS.xlsx",
                 mime=EXCEL_MIME_TYPE, 
-                key="download_split_routes_pos"
+                key="download_split_routes_pre"
             )
             
-            st.info("Este arquivo pode ser usado para importação individual no Circuit (após limpeza, se necessário) ou para distribuição aos motoristas.")
+            st.info("Cada aba (Motorista 1, Motorista 2, etc.) deve ser importada individualmente no Circuit para otimização.")
 
     else:
-        st.info("Aguardando o upload do arquivo de saída do Circuit para iniciar a divisão.")
+        st.warning("⚠️ **Etapa Pendente:** Por favor, vá para a aba **🚀 Pré-Roteirização** e clique em '🚀 Iniciar Corretor e Agrupamento' primeiro. O arquivo agrupado será carregado aqui automaticamente.")
 
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# (Mantido o fluxo de carregamento de arquivo, pois o input é a SAÍDA DO CIRCUIT)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -812,7 +800,6 @@ with tab2:
     df_final_geral = None 
     df_volumosos_impressao = None 
     df_nao_volumosos_impressao = None
-    df_limpo_para_split_pos = None # Novo: DataFrame limpo para potencial uso no Split
 
     copia_data_geral = "Nenhum arquivo carregado ou nenhum dado válido encontrado após o processamento."
     copia_data_volumosos = "Nenhum pacote volumoso encontrado na rota."
@@ -832,13 +819,10 @@ with tab2:
             else:
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
-            # Normaliza colunas antes de passar para o processamento
-            df_input_pos.columns = df_input_pos.columns.str.strip().str.lower()
-            
             # CHAMA A FUNÇÃO DE PROCESSAMENTO (AGORA RETORNA 4 OBJETOS)
             results = processar_rota_para_impressao(df_input_pos)
             
-            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, df_limpo_para_split_pos = results
+            df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, _ = results
             
             st.success(f"Arquivo '{uploaded_file_pos.name}' carregado! Total de **{len(df_input_pos)}** registros na sequência otimizada.")
             
@@ -886,7 +870,7 @@ with tab2:
             if "Table 3" in str(ke) or "Sheet" in str(ke):
                 st.error(f"Erro de Aba: A aba **'{sheet_name}'** não foi encontrada no arquivo Excel.")
             elif 'address' in str(ke) or 'notes' in str(ke):
-                 st.error(f"Erro de Coluna: O arquivo deve ter as colunas 'address' e 'notes'. Verifique o arquivo de rota.")
+                 st.error(f"Erro de Coluna: O arquivo deve ter as colunas 'address' e 'notes' (ou 'order id'). Verifique o arquivo de rota.")
             else:
                  st.error(f"Ocorreu um erro de coluna ou formato. Erro: {ke}")
         except Exception as e:

@@ -3,5 +3,6 @@ rapidfuzz
 streamlit
 openpyxl
 streamlit-aggrid
+openlocationcode
 
 

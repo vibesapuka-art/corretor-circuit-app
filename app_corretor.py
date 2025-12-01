@@ -4,7 +4,7 @@ import re
 from rapidfuzz import process, fuzz
 import io
 import streamlit as st
-import sqlite3 
+import sqlite3
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 
@@ -67,6 +67,8 @@ COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
 # NOVO: Coluna para armazenar o Plus Code
 COLUNA_PLUS_CODE = 'Plus_Code'
+# NOVO: Coluna WKT (Para CSVs do Google Maps/GIS)
+COLUNA_WKT = 'WKT'
 
 
 # Colunas esperadas no arquivo de Pós-Roteirização (Saída do Circuit)
@@ -86,7 +88,7 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (Código Omitido para Brevidade)
+# (Mantidas as funções originais do usuário)
 # ===============================================
 
 @st.cache_resource
@@ -251,6 +253,29 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df = df_entrada.copy()
     corrected_addresses = [] 
     
+    # NOVO: PASSO DE CORREÇÃO DO GOOGLE MAPS CSV (WKT)
+    # Se a coluna WKT existir, extraímos as coordenadas dela e sobrescrevemos Latitude/Longitude.
+    if COLUNA_WKT in df.columns:
+        st.info("Coluna WKT detectada. Aplicando correção de coordenadas por WKT (POINT (Lon Lat)).")
+        try:
+            # Expressão regular para extrair dois números flutuantes de "POINT (Lon Lat)"
+            # O primeiro grupo capturado é a Longitude, o segundo é a Latitude.
+            wkt_coords = df[COLUNA_WKT].astype(str).str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)')
+
+            # Garante que os valores extraídos sejam numéricos
+            wkt_coords_lon = pd.to_numeric(wkt_coords[0], errors='coerce') # Longitude
+            wkt_coords_lat = pd.to_numeric(wkt_coords[1], errors='coerce') # Latitude
+
+            # Sobrescreve as colunas Latitude e Longitude com os valores do WKT
+            # Usa .fillna() para manter os valores originais se a extração falhar (NaN).
+            df[COLUNA_LONGITUDE] = wkt_coords_lon.fillna(df[COLUNA_LONGITUDE])
+            df[COLUNA_LATITUDE] = wkt_coords_lat.fillna(df[COLUNA_LATITUDE])
+
+            st.success("Coordenadas corrigidas com sucesso usando o campo WKT do Google Maps/GIS.")
+        except Exception as e:
+            st.warning(f"Falha na correção de coordenadas por WKT: {e}. Usando coordenadas originais do arquivo.")
+
+    # Continuando o processamento (original do usuário)
     df[COLUNA_BAIRRO] = df[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
@@ -445,7 +470,6 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
-# (Código Omitido para Brevidade)
 # ===============================================
 
 def is_not_purely_volumous(ids_string):
@@ -537,7 +561,6 @@ def processar_rota_para_impressao(df_input):
 
 # ===============================================
 # INTERFACE PRINCIPAL
-# (Código Omitido para Brevidade)
 # ===============================================
 
 # 1. Conexão com o Banco de Dados (Executada uma vez)
@@ -570,7 +593,7 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **WKT (Google Maps/GIS)**, **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -588,8 +611,10 @@ with tab1:
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
-            for col in colunas_essenciais:
+            # ATENÇÃO: Adicionei a coluna WKT aqui como 'não-essencial' para evitar quebrar
+            # planilhas que não são do Google Maps, mas que o fluxo continue.
+            colunas_principais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
+            for col in colunas_principais:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
@@ -685,7 +710,7 @@ with tab1:
             df_cache = load_geoloc_cache(conn)
 
             result = None 
-            with st.spinner('Aplicando cache 100% match, Plus Code e processando dados...'): # Texto do spinner atualizado
+            with st.spinner('Aplicando correção WKT, cache 100% match, Plus Code e processando dados...'): # Texto do spinner atualizado
                  try:
                      result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
                  except Exception as e:
@@ -826,7 +851,6 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
-# (Mantido o fluxo de carregamento de arquivo, pois o input é a SAÍDA DO CIRCUIT)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -986,7 +1010,6 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
-# (Código Omitido para Brevidade)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1205,4 +1228,3 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
-

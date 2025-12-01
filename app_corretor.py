@@ -30,7 +30,8 @@ EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 # --- Configurações de Banco de Dados ---
 DB_NAME = "geoloc_cache.sqlite"
 TABLE_NAME = "correcoes_geoloc_v3" 
-CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
+# NOVO: Adicionado 'Descricao_Original' para armazenar toda a informação do KMZ
+CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Descricao_Original'] 
 PRIMARY_KEYS = ['Endereco_Completo_Cache'] 
 
 
@@ -45,12 +46,13 @@ def get_db_connection():
     return conn
 
 def create_table_if_not_exists(conn):
-    pk_str = ', '.join(PRIMARY_KEYS)
+    # pk_str é mantido como 'Endereco_Completo_Cache'
     query = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         Endereco_Completo_Cache TEXT PRIMARY KEY,
         Latitude_Corrigida REAL,
-        Longitude_Corrigida REAL
+        Longitude_Corrigida REAL,
+        Descricao_Original TEXT -- NOVO CAMPO PARA INFORMAÇÃO EXTRA
     );
     """
     try:
@@ -62,6 +64,7 @@ def create_table_if_not_exists(conn):
 @st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
 def load_geoloc_cache(conn):
     try:
+        # SELECT * irá pegar a nova coluna 'Descricao_Original'
         df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
@@ -74,13 +77,14 @@ def load_geoloc_cache(conn):
 
 
 def save_single_entry_to_db(conn, endereco, lat, lon):
+    # NOVO: Incluindo 'Descricao_Original' com valor vazio, pois é uma inserção manual rápida
     upsert_query = f"""
     INSERT OR REPLACE INTO {TABLE_NAME} 
-    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-    VALUES (?, ?, ?);
+    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Descricao_Original) 
+    VALUES (?, ?, ?, ?);
     """
     try:
-        conn.execute(upsert_query, (endereco, lat, lon))
+        conn.execute(upsert_query, (endereco, lat, lon, ""))
         conn.commit()
         st.success(f"Correção salva para: **{endereco}**.")
         load_geoloc_cache.clear() 
@@ -98,12 +102,21 @@ def import_cache_to_db(conn, uploaded_file):
         st.error(f"Erro ao ler o arquivo: {e}")
         return 0
 
-    required_cols = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
-    if not all(col in df_import.columns for col in required_cols):
-        st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols)}")
+    required_cols_min = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
+    
+    # Se Descricao_Original não estiver presente no backup, adiciona uma coluna vazia
+    if 'Descricao_Original' not in df_import.columns:
+        df_import['Descricao_Original'] = ''
+        
+    required_cols_db_insert = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Descricao_Original']
+
+    if not all(col in df_import.columns for col in required_cols_min):
+        st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols_min)} (e opcionalmente 'Descricao_Original').")
         return 0
 
-    df_import = df_import[required_cols].copy()
+    # Garante que só as colunas que importam, na ordem certa, serão usadas
+    df_import = df_import[required_cols_db_insert].copy()
+    
     df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
     df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
     df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
@@ -122,12 +135,15 @@ def import_cache_to_db(conn, uploaded_file):
                 endereco = row['Endereco_Completo_Cache']
                 lat = row['Latitude_Corrigida']
                 lon = row['Longitude_Corrigida']
+                desc = row['Descricao_Original'] # NOVO
+                
+                # NOVO: Inserção com Descricao_Original
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
-                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-                VALUES (?, ?, ?);
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Descricao_Original) 
+                VALUES (?, ?, ?, ?);
                 """
-                conn.execute(upsert_query, (endereco, lat, lon))
+                conn.execute(upsert_query, (endereco, lat, lon, desc))
                 insert_count += 1
             
             conn.commit()
@@ -158,7 +174,8 @@ def clear_geoloc_cache_db(conn):
 
 def processar_kml_kmz(uploaded_file):
     """
-    Processa arquivos KML ou KMZ para extrair endereços (Name) e coordenadas (Point).
+    Processa arquivos KML ou KMZ para extrair endereços (Name), coordenadas (Point)
+    e toda a informação adicional (Description).
     Retorna um DataFrame pronto para importação no cache.
     """
     enderecos_cache = []
@@ -206,6 +223,11 @@ def processar_kml_kmz(uploaded_file):
             endereco = placemark.find(f"{kml_namespace}name")
             point = placemark.find(f"{kml_namespace}Point/{kml_namespace}coordinates")
             
+            # NOVO: Extrair a descrição (toda a informação adicional)
+            descricao_tag = placemark.find(f"{kml_namespace}description")
+            # Se a tag existir e tiver texto, extrai. Caso contrário, deixa vazio.
+            descricao = descricao_tag.text.strip() if descricao_tag is not None and descricao_tag.text else ''
+
             if endereco is not None and point is not None and point.text:
                 
                 # O formato é Longitude, Latitude, Altura
@@ -224,7 +246,8 @@ def processar_kml_kmz(uploaded_file):
                             enderecos_cache.append({
                                 'Endereco_Completo_Cache': endereco_limpo,
                                 'Latitude_Corrigida': lat,
-                                'Longitude_Corrigida': lon
+                                'Longitude_Corrigida': lon,
+                                'Descricao_Original': descricao # NOVO: Salva a descrição
                             })
                         
                     except ValueError:
@@ -233,7 +256,8 @@ def processar_kml_kmz(uploaded_file):
                         
         if not enderecos_cache:
             st.warning("Nenhuma coordenada válida (Point) encontrada nos Placemarks do arquivo KML/KMZ.")
-            return pd.DataFrame(columns=CACHE_COLUMNS)
+            # Garante que o DF retornado tem as colunas corretas
+            return pd.DataFrame(columns=CACHE_COLUMNS) 
             
         return pd.DataFrame(enderecos_cache)
 
@@ -250,18 +274,29 @@ def import_kml_df_to_db(conn, df_import):
     Função auxiliar para salvar o DF gerado pelo KML/KMZ no banco de dados.
     """
     insert_count = 0
+    
+    # Adiciona a coluna se o KML não gerou (o que não deve acontecer)
+    if 'Descricao_Original' not in df_import.columns:
+        df_import['Descricao_Original'] = ''
+        
+    required_cols_db_insert = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Descricao_Original']
+    df_import = df_import[required_cols_db_insert] # Garante a ordem correta
+    
     try:
         with st.spinner(f"Processando a importação de {len(df_import)} correções do KML/KMZ..."):
             for index, row in df_import.iterrows():
                 endereco = row['Endereco_Completo_Cache']
                 lat = row['Latitude_Corrigida']
                 lon = row['Longitude_Corrigida']
+                desc = row['Descricao_Original'] # NOVO
+                
+                # NOVO: Incluindo Descricao_Original no INSERT
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
-                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-                VALUES (?, ?, ?);
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Descricao_Original) 
+                VALUES (?, ?, ?, ?);
                 """
-                conn.execute(upsert_query, (endereco, lat, lon))
+                conn.execute(upsert_query, (endereco, lat, lon, desc))
                 insert_count += 1
             
             conn.commit()
@@ -324,6 +359,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     
     # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
     if not df_cache_geoloc.empty:
+        # A coluna 'Descricao_Original' será carregada, mas não é usada neste merge
         df_cache_lookup = df_cache_geoloc.rename(columns={
             'Endereco_Completo_Cache': 'Chave_Cache_DB', 
             'Latitude_Corrigida': 'Cache_Lat',
@@ -343,7 +379,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
         corrected_addresses = df.loc[cache_mask, 'Chave_Cache_DB'].unique().tolist()
         
-        df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
+        # Dropa todas as colunas do cache que foram usadas no merge
+        df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon', 'Descricao_Original'], errors='ignore')
     
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
@@ -1003,7 +1040,7 @@ with tab2:
         # --- BOTÕES DE DOWNLOAD ---
         if df_final_geral is not None and not df_final_geral.empty:
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+            with pd.ExcelWriter(buffer, engine='openypxl') as writer: 
                 df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
                 
                 if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
@@ -1096,13 +1133,16 @@ with tab3:
     if uploaded_kml_kmz is not None:
         if st.button("⬆️ Importar Correções do KML/KMZ", key="btn_import_kml_kmz"):
             with st.spinner(f"Processando arquivo '{uploaded_kml_kmz.name}'..."):
+                # O df_kml_data agora contém a Descricao_Original
                 df_kml_data = processar_kml_kmz(uploaded_kml_kmz)
                 
                 if df_kml_data is not None and not df_kml_data.empty:
                     st.success(f"Arquivo KML/KMZ processado! **{len(df_kml_data)}** correções encontradas.")
+                    # A visualização inclui a nova coluna
                     st.dataframe(df_kml_data, use_container_width=True)
                     
                     if st.button("✅ Confirmar e Salvar Correções no Cache", key="btn_save_kml_to_db"):
+                         # A importação salva toda a informação, incluindo a Descricao_Original
                          import_kml_df_to_db(conn, df_kml_data)
                 else:
                     st.warning("Nenhum dado de correção extraído do arquivo.")
@@ -1189,6 +1229,7 @@ with tab3:
                 else:
                     try:
                         endereco_limpo = new_endereco.strip().rstrip(';')
+                        # A função save_single_entry_to_db insere a Descricao_Original vazia
                         save_single_entry_to_db(conn, endereco_limpo, lat_to_save, lon_to_save)
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
@@ -1221,6 +1262,7 @@ with tab3:
         def export_cache(df_cache):
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                # O backup agora inclui a nova coluna
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)
             return buffer

@@ -4,22 +4,9 @@ import re
 from rapidfuzz import process, fuzz
 import io
 import streamlit as st
-import sqlite3
+import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-
-# NOVO: Importa a biblioteca para calcular o Plus Code (Open Location Code)
-try:
-    from openlocationcode import openlocationcode as olc 
-except ModuleNotFoundError:
-    # Se a biblioteca não estiver instalada, define um stub para evitar quebrar o app imediatamente
-    st.error("ERRO: O pacote 'openlocationcode' não foi encontrado. Adicione-o ao seu requirements.txt.")
-    # Definição dummy para permitir o fluxo do app (embora a funcionalidade de Plus Code não funcione)
-    class DummyOLC:
-        @staticmethod
-        def encode(lat, lon, length=10):
-            return "PLUS_CODE_FALTANDO"
-    olc = DummyOLC()
 
 
 # --- Configurações Iniciais da Página ---
@@ -65,11 +52,6 @@ COLUNA_SEQUENCE = 'Sequence'
 COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
-# NOVO: Coluna para armazenar o Plus Code
-COLUNA_PLUS_CODE = 'Plus_Code'
-# NOVO: Coluna WKT (Para CSVs do Google Maps/GIS)
-COLUNA_WKT = 'WKT'
-
 
 # Colunas esperadas no arquivo de Pós-Roteirização (Saída do Circuit)
 COLUNA_ADDRESS_CIRCUIT = 'address' 
@@ -88,6 +70,7 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
+# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 @st.cache_resource
@@ -205,57 +188,16 @@ def clear_geoloc_cache_db(conn):
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
+# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
-
-# ---------------------------------------------------------------------------
-# NOVA FUNÇÃO DE PADRONIZAÇÃO COMPLETA (Substituindo 'limpar_endereco')
-# Inclui a lógica robusta de remoção de acentos/caracteres especiais.
-# ---------------------------------------------------------------------------
-def padronizar_endereco_completo(endereco):
-    """
-    Função para padronizar strings: remove acentos, pontuação (exceto vírgula), 
-    minúsculas, e aplica abreviações comuns.
-    """
-    if pd.isna(endereco) or endereco is None:
+def limpar_endereco(endereco):
+    if pd.isna(endereco):
         return ""
-    
-    texto = str(endereco).lower().strip()
-    
-    # 1. REMOÇÃO DE ACENTOS (Garante que o Fuzzy Match funcione com ou sem acentos)
-    # Usa a técnica de Normalização (NFKD) + ASCII encode/decode
-    texto_normalizado = pd.Series(texto).str.normalize('NFKD').iloc[0]
-    texto_sem_acentos = texto_normalizado.encode('ascii', errors='ignore').decode('utf-8')
-    texto = texto_sem_acentos
-    
-    # 2. LIMPEZA DE PONTUAÇÃO E CARACTERES ESPECIAIS (lógica original do usuário)
-    # Remove pontuação, exceto vírgula e espaço
-    texto = re.sub(r'[^\w\s,]', '', texto) 
-    # Normaliza múltiplos espaços para um único espaço
-    texto = re.sub(r'\s+', ' ', texto)
-    # Abreviações
-    texto = texto.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
-    
-    return texto.strip()
-
-
-# NOVO: Função para calcular o Plus Code
-def calcular_plus_code(df):
-    """Calcula o Plus Code (Open Location Code) para cada linha."""
-    # Garante que as colunas sejam numéricas (necessário para o olc.encode)
-    df[COLUNA_LATITUDE] = pd.to_numeric(df[COLUNA_LATITUDE], errors='coerce')
-    df[COLUNA_LONGITUDE] = pd.to_numeric(df[COLUNA_LONGITUDE], errors='coerce')
-
-    def generate_code(row):
-        lat = row[COLUNA_LATITUDE]
-        lon = row[COLUNA_LONGITUDE]
-        if pd.notna(lat) and pd.notna(lon):
-            # OLC padrão com 10 dígitos (10 metros de precisão)
-            return olc.encode(lat, lon, length=10) 
-        return ""
-    
-    df[COLUNA_PLUS_CODE] = df.apply(generate_code, axis=1)
-    return df
-
+    endereco = str(endereco).lower().strip()
+    endereco = re.sub(r'[^\w\s,]', '', endereco) 
+    endereco = re.sub(r'\s+', ' ', endereco)
+    endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
+    return endereco
 
 def get_most_common_or_empty(x):
     x_limpo = x.dropna()
@@ -274,29 +216,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df = df_entrada.copy()
     corrected_addresses = [] 
     
-    # NOVO: PASSO DE CORREÇÃO DO GOOGLE MAPS CSV (WKT)
-    # Se a coluna WKT existir, extraímos as coordenadas dela e sobrescrevemos Latitude/Longitude.
-    if COLUNA_WKT in df.columns:
-        st.info("Coluna WKT detectada. Aplicando correção de coordenadas por WKT (POINT (Lon Lat)).")
-        try:
-            # Expressão regular para extrair dois números flutuantes de "POINT (Lon Lat)"
-            # O primeiro grupo capturado é a Longitude, o segundo é a Latitude.
-            wkt_coords = df[COLUNA_WKT].astype(str).str.extract(r'POINT \(([-\d\.]+) ([-\d\.]+)\)')
-
-            # Garante que os valores extraídos sejam numéricos
-            wkt_coords_lon = pd.to_numeric(wkt_coords[0], errors='coerce') # Longitude
-            wkt_coords_lat = pd.to_numeric(wkt_coords[1], errors='coerce') # Latitude
-
-            # Sobrescreve as colunas Latitude e Longitude com os valores do WKT
-            # Usa .fillna() para manter os valores originais se a extração falhar (NaN).
-            df[COLUNA_LONGITUDE] = wkt_coords_lon.fillna(df[COLUNA_LONGITUDE])
-            df[COLUNA_LATITUDE] = wkt_coords_lat.fillna(df[COLUNA_LATITUDE])
-
-            st.success("Coordenadas corrigidas com sucesso usando o campo WKT do Google Maps/GIS.")
-        except Exception as e:
-            st.warning(f"Falha na correção de coordenadas por WKT: {e}. Usando coordenadas originais do arquivo.")
-
-    # Continuando o processamento (original do usuário)
     df[COLUNA_BAIRRO] = df[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
@@ -337,15 +256,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         
         df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
-    # NOVO PASSO: GERAR PLUS CODE APÓS O CACHE DE GEOLOC
-    df = calcular_plus_code(df)
-    st.info("Plus Codes (Open Location Codes) calculados para todas as entradas.")
-
-
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
-    # APLICANDO A NOVA FUNÇÃO COMPLETA DE PADRONIZAÇÃO
-    df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(padronizar_endereco_completo)
-    
+    df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
     
@@ -394,7 +306,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
-        Plus_Code_Agrupado=(COLUNA_PLUS_CODE, 'first'), # NOVO: Agrupa o Plus Code
         Bairro_Agrupado=(COLUNA_BAIRRO, get_most_common_or_empty),
         Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         Min_Sequence=('Sequence_Num', 'min') 
@@ -412,12 +323,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*$', '', regex=True) 
     
     # A coluna de Notes deve conter o Order ID e outras infos
-    # NOVO: Inclui o Plus Code na coluna Notes (antes do CEP)
     notas_completas = (
         df_agrupado['Sequences_Agrupadas'] + '; ' +
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
-        ' | Plus Code: ' + df_agrupado['Plus_Code_Agrupado'].astype(str) + # NOVO: Adiciona o Plus Code
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
     
@@ -427,8 +336,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
-        'Notes': notas_completas,
-        COLUNA_PLUS_CODE: df_agrupado['Plus_Code_Agrupado'] # NOVO: Adiciona a coluna separada
+        'Notes': notas_completas
     }) 
     
     # Adicionando uma coluna 'Sequence_Base' para manter a ordem de importação, se for usado o split
@@ -450,8 +358,7 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         return {}
     
     # Garante que as colunas essenciais para importação do Circuit estejam presentes
-    # INCLUI COLUNA_PLUS_CODE para exportação no Split
-    COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes', COLUNA_PLUS_CODE]
+    COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes']
     df_export = df_circuit[['Sequence_Base'] + COLUNAS_EXPORT_SPLIT].copy()
     
     df_export.rename(columns={'Notes': 'Notes', 'Address': 'Address'}, inplace=True)
@@ -480,8 +387,8 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         # Remove a coluna 'Sequence_Base' antes de exportar
         df_motorista = df_motorista.drop(columns=['Sequence_Base'])
         
-        # Colunas finais para exportação (Inclui Plus Code)
-        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes', COLUNA_PLUS_CODE]]
+        # Colunas finais para exportação
+        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']]
         
         # Nome da Rota (com contagem de paradas)
         rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
@@ -493,6 +400,7 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 def is_not_purely_volumous(ids_string):
@@ -537,7 +445,7 @@ def processar_rota_para_impressao(df_input):
     df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].str.strip('"')
     
     # 1. Separa o campo 'Notes' pelo PONTO E VÍRGULA
-    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | Plus Code: 5889+9F | CEP: 80000000'
+    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | CEP: 80000000'
     df_split = df[COLUNA_NOTES_CIRCUIT].str.split(';', n=1, expand=True)
     df['Ordem ID'] = df_split[0].str.strip() 
     
@@ -548,16 +456,14 @@ def processar_rota_para_impressao(df_input):
     # POIS O ID JÁ ESTÁ LIMPO NO CAMPO 'Ordem ID'
     df['ID_Pacote_Limpo'] = df['Ordem ID'].str.strip() 
     
-    # INCLUI O ADDRESS CLEAN (Endereço da parada) NA LISTA DE IMPRESSÃO
-    df['Address_Clean'] = df[COLUNA_ADDRESS_CIRCUIT].astype(str)
-    
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
-        df['Address_Clean'].astype(str) + 
-        ' | ' +
-        df['Anotações Completas'].astype(str) # Inclui cidade, plus code, cep, etc.
+        df['Anotações Completas'].astype(str)
     )
+    
+    # Adiciona a coluna de endereço para visualização na lista de impressão
+    df['Address_Clean'] = df[COLUNA_ADDRESS_CIRCUIT].astype(str)
     
     coluna_filtro = 'ID_Pacote_Limpo' 
     
@@ -576,6 +482,7 @@ def processar_rota_para_impressao(df_input):
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'Address_Clean']].copy()
     
     # Retorna o DF original *limpo* (com colunas normalizadas) para o Split, se necessário
+    # NOTA: df_limpo_para_split_pos não é mais usado no split, mas mantido por segurança.
     df_limpo_para_split_pos = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
     df_limpo_para_split_pos.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
     
@@ -616,7 +523,7 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **WKT (Google Maps/GIS)**, **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -634,10 +541,8 @@ with tab1:
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            # ATENÇÃO: Adicionei a coluna WKT aqui como 'não-essencial' para evitar quebrar
-            # planilhas que não são do Google Maps, mas que o fluxo continue.
-            colunas_principais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
-            for col in colunas_principais:
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
+            for col in colunas_essenciais:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
@@ -733,11 +638,10 @@ with tab1:
             df_cache = load_geoloc_cache(conn)
 
             result = None 
-            with st.spinner('Aplicando correção WKT, cache 100% match, Plus Code e processando dados...'): # Texto do spinner atualizado
+            with st.spinner('Aplicando cache 100% match e processando dados...'):
                  try:
                      result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
                  except Exception as e:
-                     # A função padronizar_endereco_completo foi corrigida para evitar o erro 'length'.
                      st.error(f"Erro Crítico durante a correção e agrupamento: {e}")
                      result = None 
                  
@@ -849,8 +753,7 @@ with tab_split:
                 # Prepara o arquivo Excel individual
                 buffer_individual = io.BytesIO()
                 with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
-                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes', 'Plus_Code'
-                    # O Circuit precisa apenas das 5 colunas principais, mas vamos incluir o Plus Code na aba.
+                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
@@ -875,6 +778,7 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# (Mantido o fluxo de carregamento de arquivo, pois o input é a SAÍDA DO CIRCUIT)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -1034,6 +938,7 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
+# (Mantido como estava)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():

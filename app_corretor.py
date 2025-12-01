@@ -88,7 +88,6 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (Mantidas as funções originais do usuário)
 # ===============================================
 
 @st.cache_resource
@@ -208,6 +207,37 @@ def clear_geoloc_cache_db(conn):
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
 # ===============================================
 
+# ---------------------------------------------------------------------------
+# NOVA FUNÇÃO DE PADRONIZAÇÃO COMPLETA (Substituindo 'limpar_endereco')
+# Inclui a lógica robusta de remoção de acentos/caracteres especiais.
+# ---------------------------------------------------------------------------
+def padronizar_endereco_completo(endereco):
+    """
+    Função para padronizar strings: remove acentos, pontuação (exceto vírgula), 
+    minúsculas, e aplica abreviações comuns.
+    """
+    if pd.isna(endereco) or endereco is None:
+        return ""
+    
+    texto = str(endereco).lower().strip()
+    
+    # 1. REMOÇÃO DE ACENTOS (Garante que o Fuzzy Match funcione com ou sem acentos)
+    # Usa a técnica de Normalização (NFKD) + ASCII encode/decode
+    texto_normalizado = pd.Series(texto).str.normalize('NFKD').iloc[0]
+    texto_sem_acentos = texto_normalizado.encode('ascii', errors='ignore').decode('utf-8')
+    texto = texto_sem_acentos
+    
+    # 2. LIMPEZA DE PONTUAÇÃO E CARACTERES ESPECIAIS (lógica original do usuário)
+    # Remove pontuação, exceto vírgula e espaço
+    texto = re.sub(r'[^\w\s,]', '', texto) 
+    # Normaliza múltiplos espaços para um único espaço
+    texto = re.sub(r'\s+', ' ', texto)
+    # Abreviações
+    texto = texto.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
+    
+    return texto.strip()
+
+
 # NOVO: Função para calcular o Plus Code
 def calcular_plus_code(df):
     """Calcula o Plus Code (Open Location Code) para cada linha."""
@@ -226,15 +256,6 @@ def calcular_plus_code(df):
     df[COLUNA_PLUS_CODE] = df.apply(generate_code, axis=1)
     return df
 
-
-def limpar_endereco(endereco):
-    if pd.isna(endereco):
-        return ""
-    endereco = str(endereco).lower().strip()
-    endereco = re.sub(r'[^\w\s,]', '', endereco) 
-    endereco = re.sub(r'\s+', ' ', endereco)
-    endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
-    return endereco
 
 def get_most_common_or_empty(x):
     x_limpo = x.dropna()
@@ -322,7 +343,9 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 
 
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
-    df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
+    # APLICANDO A NOVA FUNÇÃO COMPLETA DE PADRONIZAÇÃO
+    df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(padronizar_endereco_completo)
+    
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
     
@@ -714,6 +737,7 @@ with tab1:
                  try:
                      result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
                  except Exception as e:
+                     # A função padronizar_endereco_completo foi corrigida para evitar o erro 'length'.
                      st.error(f"Erro Crítico durante a correção e agrupamento: {e}")
                      result = None 
                  

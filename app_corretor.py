@@ -70,7 +70,6 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 @st.cache_resource
@@ -145,6 +144,9 @@ def import_cache_to_db(conn, uploaded_file):
     df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
     df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
     
+    # Remove duplicatas pela chave, priorizando o último (importado)
+    df_import = df_import.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
+    
     if df_import.empty:
         st.warning("Nenhum dado válido de correção (Lat/Lon) foi encontrado no arquivo para importar.")
         return 0
@@ -167,11 +169,98 @@ def import_cache_to_db(conn, uploaded_file):
             conn.commit()
             load_geoloc_cache.clear()
             count_after = len(load_geoloc_cache(conn))
-            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
+            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas/atualizadas. O cache agora tem **{count_after}** entradas.")
             st.rerun() 
             return count_after
     except Exception as e:
         st.error(f"Erro crítico ao inserir dados no cache. Erro: {e}")
+        return 0
+
+# NOVO: Função para importar o arquivo de correções do Google Maps
+def import_google_maps_corrections(conn, uploaded_file):
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df_import = pd.read_csv(uploaded_file)
+        else: 
+            df_import = pd.read_excel(uploaded_file, sheet_name=0)
+    except Exception as e:
+        st.error(f"Erro ao ler o arquivo: {e}")
+        return 0
+
+    # O arquivo do Google Maps/Circuit deve ter as colunas globais de entrada
+    required_gmaps_cols = [COLUNA_ENDERECO, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO]
+    
+    if not all(col in df_import.columns for col in required_gmaps_cols):
+        st.error(f"Erro de Importação: O arquivo deve conter as colunas: {', '.join(required_gmaps_cols)}")
+        return 0
+
+    # 1. Criação da Chave de Cache (Endereço + Bairro)
+    df_import = df_import.copy()
+    
+    # Tratamento de nulos/formato para a criação da chave
+    df_import[COLUNA_BAIRRO] = df_import[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
+    
+    # Cria a chave de cache usando a mesma lógica do processamento (Endereço + Bairro)
+    df_import['Endereco_Completo_Cache'] = (
+        df_import[COLUNA_ENDERECO].astype(str).str.strip() + 
+        ', ' + 
+        df_import[COLUNA_BAIRRO].astype(str).str.strip()
+    )
+    # Limpa vírgulas extras no final ou duplas
+    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True)
+    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
+    
+    # 2. Renomear colunas de coordenadas para o formato do cache
+    df_import.rename(columns={
+        COLUNA_LATITUDE: 'Latitude_Corrigida',
+        COLUNA_LONGITUDE: 'Longitude_Corrigida'
+    }, inplace=True)
+    
+    # 3. Limpeza e conversão de dados (Garante que só haja as colunas do cache)
+    df_import = df_import[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    
+    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
+    df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    df_import['Latitude_Corrigida'] = pd.to_numeric(df_import['Latitude_Corrigida'], errors='coerce')
+    df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
+    df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida', 'Endereco_Completo_Cache'])
+    
+    # Se houver duplicatas de chave no arquivo de importação, pega o último (corrigido)
+    df_import = df_import.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
+    
+    if df_import.empty:
+        st.warning("Nenhum dado válido de correção (Lat/Lon e Endereço) foi encontrado no arquivo para importar.")
+        return 0
+        
+    # 4. Inserção no Banco de Dados (Upsert)
+    insert_count = 0
+    try:
+        with st.spinner(f"Processando a importação de {len(df_import)} correções do Google Maps..."):
+            
+            for index, row in df_import.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                
+                # A chave primária garantirá o REPLACE se o endereço já existir (UPSERT)
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
+                VALUES (?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon))
+                insert_count += 1
+            
+            conn.commit()
+            load_geoloc_cache.clear()
+            count_after = len(load_geoloc_cache(conn))
+            st.success(f"Importação de correções do Google Maps concluída! **{insert_count}** entradas processadas/atualizadas. O cache agora tem **{count_after}** entradas.")
+            st.rerun() 
+            return count_after
+            
+    except Exception as e:
+        st.error(f"Erro crítico ao inserir dados do Google Maps no cache. Erro: {e}")
         return 0
         
 def clear_geoloc_cache_db(conn):
@@ -400,7 +489,6 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 def is_not_purely_volumous(ids_string):
@@ -937,8 +1025,7 @@ with tab2:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
-# (Mantido como estava)
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (Seções reenumeradas)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1094,8 +1181,26 @@ with tab3:
     st.markdown("---")
     
     
-    # --- BACKUP E RESTAURAÇÃO ---
-    st.header("4.3 Backup e Restauração do Cache")
+    # --- NOVO BLOCO: IMPORTAÇÃO DE CORREÇÕES DO GOOGLE MAPS (4.3) ---
+    st.header("4.3 Importar Correções de Planilha (Google Maps/Circuit)")
+    st.info("Use o arquivo de rota do Google Maps ou uma planilha contendo as colunas **'Destination Address'**, **'Bairro'**, **'Latitude'** e **'Longitude'**.")
+    st.warning("O sistema cria a chave de cache combinando Endereço + Bairro e irá **substituir** entradas existentes se a chave for igual.")
+
+    uploaded_gmaps_correction = st.file_uploader(
+        "Arraste o arquivo de Correções aqui (CSV/Excel):", 
+        type=['csv', 'xlsx'],
+        key="upload_gmaps_correction"
+    )
+
+    if uploaded_gmaps_correction is not None:
+        if st.button("⬆️ Aplicar Correções da Planilha no Cache", key="btn_import_gmaps_correction"):
+            with st.spinner('Processando e aplicando correções da planilha...'):
+                import_google_maps_corrections(conn, uploaded_gmaps_correction)
+    
+    st.markdown("---")
+    
+    # --- BACKUP E RESTAURAÇÃO (4.4) ---
+    st.header("4.4 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
     col_backup, col_restauracao = st.columns(2)
@@ -1140,10 +1245,10 @@ with tab3:
                     import_cache_to_db(conn, uploaded_backup)
                     
     # ----------------------------------------------------------------------------------
-    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
+    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO) (4.5)
     # ----------------------------------------------------------------------------------
     st.markdown("---")
-    st.header("4.4 Limpar TODO o Cache de Geolocalização")
+    st.header("4.5 Limpar TODO o Cache de Geolocalização")
     st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas.")
     
     if len(df_cache_original) > 0:

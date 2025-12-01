@@ -176,7 +176,7 @@ def import_cache_to_db(conn, uploaded_file):
         st.error(f"Erro crítico ao inserir dados no cache. Erro: {e}")
         return 0
 
-# NOVO: Função para importar o arquivo de correções do Google Maps
+# Função para importar o arquivo de correções do Google Maps (e gerar o formato Cache)
 def import_google_maps_corrections(conn, uploaded_file):
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -186,49 +186,16 @@ def import_google_maps_corrections(conn, uploaded_file):
     except Exception as e:
         st.error(f"Erro ao ler o arquivo: {e}")
         return 0
-
-    # O arquivo do Google Maps/Circuit deve ter as colunas globais de entrada
-    required_gmaps_cols = [COLUNA_ENDERECO, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO]
     
-    if not all(col in df_import.columns for col in required_gmaps_cols):
-        st.error(f"Erro de Importação: O arquivo deve conter as colunas: {', '.join(required_gmaps_cols)}")
+    try:
+        df_import = generate_cache_df_from_input(df_import)
+    except KeyError as ke:
+        st.error(f"{ke}")
+        return 0
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo de entrada: {e}")
         return 0
 
-    # 1. Criação da Chave de Cache (Endereço + Bairro)
-    df_import = df_import.copy()
-    
-    # Tratamento de nulos/formato para a criação da chave
-    df_import[COLUNA_BAIRRO] = df_import[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
-    
-    # Cria a chave de cache usando a mesma lógica do processamento (Endereço + Bairro)
-    df_import['Endereco_Completo_Cache'] = (
-        df_import[COLUNA_ENDERECO].astype(str).str.strip() + 
-        ', ' + 
-        df_import[COLUNA_BAIRRO].astype(str).str.strip()
-    )
-    # Limpa vírgulas extras no final ou duplas
-    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True)
-    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
-    
-    # 2. Renomear colunas de coordenadas para o formato do cache
-    df_import.rename(columns={
-        COLUNA_LATITUDE: 'Latitude_Corrigida',
-        COLUNA_LONGITUDE: 'Longitude_Corrigida'
-    }, inplace=True)
-    
-    # 3. Limpeza e conversão de dados (Garante que só haja as colunas do cache)
-    df_import = df_import[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
-    
-    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
-    df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_import['Latitude_Corrigida'] = pd.to_numeric(df_import['Latitude_Corrigida'], errors='coerce')
-    df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
-    df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida', 'Endereco_Completo_Cache'])
-    
-    # Se houver duplicatas de chave no arquivo de importação, pega o último (corrigido)
-    df_import = df_import.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
-    
     if df_import.empty:
         st.warning("Nenhum dado válido de correção (Lat/Lon e Endereço) foi encontrado no arquivo para importar.")
         return 0
@@ -273,11 +240,64 @@ def clear_geoloc_cache_db(conn):
         st.rerun() 
     except Exception as e:
         st.error(f"❌ Erro ao limpar o cache: {e}")
+        
+        
+# ===============================================
+# NOVA FUNÇÃO DE CONVERSÃO PARA CACHE 
+# ===============================================
+
+def generate_cache_df_from_input(df_entrada):
+    """
+    Converte um DataFrame de entrada (formato Circuit/Google Maps)
+    para o formato de Cache de Geolocalização.
+    """
+    
+    # As colunas globais de entrada são usadas como base
+    required_gmaps_cols = [COLUNA_ENDERECO, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO]
+    
+    if not all(col in df_entrada.columns for col in required_gmaps_cols):
+        raise KeyError(f"Erro de Coluna: O arquivo deve conter as colunas: {', '.join(required_gmaps_cols)}")
+    
+    df_export = df_entrada.copy()
+    
+    # 1. Criação da Chave de Cache (Endereço + Bairro)
+    df_export[COLUNA_BAIRRO] = df_export[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
+    
+    # Cria a chave de cache usando a mesma lógica do processamento (Endereço + Bairro)
+    df_export['Endereco_Completo_Cache'] = (
+        df_export[COLUNA_ENDERECO].astype(str).str.strip() + 
+        ', ' + 
+        df_export[COLUNA_BAIRRO].astype(str).str.strip()
+    )
+    # Limpa vírgulas extras no final ou duplas
+    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True)
+    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
+    
+    # 2. Renomear colunas de coordenadas para o formato do cache
+    df_export.rename(columns={
+        COLUNA_LATITUDE: 'Latitude_Corrigida',
+        COLUNA_LONGITUDE: 'Longitude_Corrigida'
+    }, inplace=True)
+    
+    # 3. Limpeza e conversão de dados (Garante que só haja as colunas do cache)
+    df_export = df_export[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    
+    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
+    df_export['Latitude_Corrigida'] = df_export['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    df_export['Longitude_Corrigida'] = df_export['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
+    df_export['Latitude_Corrigida'] = pd.to_numeric(df_export['Latitude_Corrigida'], errors='coerce')
+    df_export['Longitude_Corrigida'] = pd.to_numeric(df_export['Longitude_Corrigida'], errors='coerce')
+    df_export = df_export.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida', 'Endereco_Completo_Cache'])
+    
+    # Remove duplicatas de chave (para criar um cache limpo e único)
+    df_export = df_export.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
+
+    return df_export
 
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
+# (Mantidas do Código Anterior)
 # ===============================================
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -1181,7 +1201,7 @@ with tab3:
     st.markdown("---")
     
     
-    # --- NOVO BLOCO: IMPORTAÇÃO DE CORREÇÕES DO GOOGLE MAPS (4.3) ---
+    # --- BLOCO: IMPORTAÇÃO DE CORREÇÕES DO GOOGLE MAPS (4.3) ---
     st.header("4.3 Importar Correções de Planilha (Google Maps/Circuit)")
     st.info("Use o arquivo de rota do Google Maps ou uma planilha contendo as colunas **'Destination Address'**, **'Bairro'**, **'Latitude'** e **'Longitude'**.")
     st.warning("O sistema cria a chave de cache combinando Endereço + Bairro e irá **substituir** entradas existentes se a chave for igual.")
@@ -1199,8 +1219,59 @@ with tab3:
     
     st.markdown("---")
     
-    # --- BACKUP E RESTAURAÇÃO (4.4) ---
-    st.header("4.4 Backup e Restauração do Cache")
+    # --- NOVO BLOCO: CONVERSOR PARA FORMATO CACHE (4.4) ---
+    st.header("4.4 Converter Planilha para Formato Cache de Geolocalização")
+    st.info("Esta ferramenta pega sua planilha original e a formata **apenas** com as colunas: **Endereco\_Completo\_Cache**, **Latitude\_Corrigida** e **Longitude\_Corrigida**.")
+    st.caption("Use esta função para criar backups padronizados ou para gerar o 'arquivo cache' para outro sistema.")
+    
+    uploaded_file_to_convert = st.file_uploader(
+        "Arraste a planilha de entrada (que tem Endereço, Bairro, Lat e Lon) para converter:", 
+        type=['csv', 'xlsx'],
+        key="upload_file_to_convert"
+    )
+    
+    if uploaded_file_to_convert is not None:
+        if st.button("🔄 Gerar Arquivo no Formato Cache", key="btn_generate_cache_file"):
+            df_to_convert = None
+            try:
+                if uploaded_file_to_convert.name.endswith('.csv'):
+                    df_to_convert = pd.read_csv(uploaded_file_to_convert)
+                else: 
+                    df_to_convert = pd.read_excel(uploaded_file_to_convert, sheet_name=0)
+                
+                with st.spinner('Convertendo e formatando os dados...'):
+                    df_cache_format = generate_cache_df_from_input(df_to_convert)
+                
+                if df_cache_format.empty:
+                    st.warning("A conversão não gerou dados válidos (verifique se as colunas estão preenchidas).")
+                else:
+                    st.success(f"Conversão concluída! **{len(df_cache_format)}** entradas formatadas.")
+                    st.dataframe(df_cache_format, use_container_width=True)
+                    
+                    buffer_convert = io.BytesIO()
+                    with pd.ExcelWriter(buffer_convert, engine='openpyxl') as writer:
+                        df_cache_format.to_excel(writer, index=False, sheet_name='Formato_Cache_Padrao')
+                        
+                    buffer_convert.seek(0)
+                    
+                    st.download_button(
+                        label="⬇️ Baixar ARQUIVO CONVERTIDO (Formato Cache)",
+                        data=buffer_convert,
+                        file_name="planilha_convertida_para_cache.xlsx",
+                        mime=EXCEL_MIME_TYPE, 
+                        key="download_converted_cache"
+                    )
+                    
+            except KeyError as ke:
+                st.error(f"{ke}. Verifique as colunas de entrada.")
+            except Exception as e:
+                st.error(f"Erro ao processar o arquivo. Erro: {e}")
+
+    
+    st.markdown("---")
+    
+    # --- BACKUP E RESTAURAÇÃO (4.5) ---
+    st.header("4.5 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
     col_backup, col_restauracao = st.columns(2)
@@ -1240,25 +1311,4 @@ with tab3:
         )
         
         if uploaded_backup is not None:
-            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
-                with st.spinner('Restaurando dados do arquivo...'):
-                    import_cache_to_db(conn, uploaded_backup)
-                    
-    # ----------------------------------------------------------------------------------
-    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO) (4.5)
-    # ----------------------------------------------------------------------------------
-    st.markdown("---")
-    st.header("4.5 Limpar TODO o Cache de Geolocalização")
-    st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas.")
-    
-    if len(df_cache_original) > 0:
-        confirm_clear = st.checkbox(
-            f"Eu confirmo que desejo excluir permanentemente **{len(df_cache_original)}** entradas do cache.", 
-            key="confirm_clear_cache"
-        )
-        
-        if confirm_clear:
-            if st.button("🔴 EXCLUIR TODOS OS DADOS DO CACHE AGORA", key="btn_final_clear_cache"):
-                clear_geoloc_cache_db(conn)
-    else:
-        st.info("O cache já está vazio. Não há dados para excluir.")
+            if st.button("⬆️

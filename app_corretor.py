@@ -7,7 +7,19 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-from openlocationcode import openlocationcode as olc # NOVO: Para converter Plus Code
+
+# NOVO: Importa a biblioteca para calcular o Plus Code (Open Location Code)
+try:
+    from openlocationcode import openlocationcode as olc 
+except ModuleNotFoundError:
+    # Se a biblioteca não estiver instalada, define um stub para evitar quebrar o app imediatamente
+    st.error("ERRO: O pacote 'openlocationcode' não foi encontrado. Adicione-o ao seu requirements.txt.")
+    # Definição dummy para permitir o fluxo do app (embora a funcionalidade de Plus Code não funcione)
+    class DummyOLC:
+        @staticmethod
+        def encode(lat, lon, length=10):
+            return "PLUS_CODE_FALTANDO"
+    olc = DummyOLC()
 
 
 # --- Configurações Iniciais da Página ---
@@ -53,6 +65,9 @@ COLUNA_SEQUENCE = 'Sequence'
 COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
+# NOVO: Coluna para armazenar o Plus Code
+COLUNA_PLUS_CODE = 'Plus_Code'
+
 
 # Colunas esperadas no arquivo de Pós-Roteirização (Saída do Circuit)
 COLUNA_ADDRESS_CIRCUIT = 'address' 
@@ -71,6 +86,7 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
+# (Código Omitido para Brevidade)
 # ===============================================
 
 @st.cache_resource
@@ -152,15 +168,17 @@ def import_cache_to_db(conn, uploaded_file):
     insert_count = 0
     try:
         with st.spinner(f"Processando a importação de {len(df_import)} linhas..."):
-            cursor = conn.cursor()
-            upsert_query = f"""
-            INSERT OR REPLACE INTO {TABLE_NAME} 
-            (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-            VALUES (?, ?, ?);
-            """
-            data_to_insert = df_import[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].values.tolist()
-            cursor.executemany(upsert_query, data_to_insert)
-            insert_count = cursor.rowcount
+            for index, row in df_import.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
+                VALUES (?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon))
+                insert_count += 1
             
             conn.commit()
             load_geoloc_cache.clear()
@@ -171,69 +189,6 @@ def import_cache_to_db(conn, uploaded_file):
     except Exception as e:
         st.error(f"Erro crítico ao inserir dados no cache. Erro: {e}")
         return 0
-        
-# --- NOVA FUNÇÃO: Importar Correções do Google My Maps ---
-def import_google_maps_corrections(conn, uploaded_file):
-    try:
-        # Tenta ler o CSV (o formato padrão de exportação do My Maps é CSV)
-        df_import = pd.read_csv(uploaded_file, sep=None, engine='python')
-    except Exception as e:
-        st.error(f"Erro ao ler o arquivo CSV. Verifique o formato. Erro: {e}")
-        return 0
-
-    # Colunas esperadas no CSV exportado do My Maps (do arquivo que você mostrou)
-    COLUNAS_MAPS = ['Destination Address', 'Latitude', 'Longitude'] 
-    
-    # Colunas exigidas pelo seu cache (DB)
-    COLUNAS_CACHE = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
-
-    if not all(col in df_import.columns for col in COLUNAS_MAPS):
-        st.error(f"Erro de Coluna: O arquivo exportado do Google My Maps deve conter as colunas: {', '.join(COLUNAS_MAPS)}. Verifique o cabeçalho do arquivo.")
-        return 0
-
-    # 1. Seleciona e renomeia as colunas para o formato do cache
-    df_import = df_import[COLUNAS_MAPS].copy()
-    df_import.columns = COLUNAS_CACHE
-    
-    # 2. Garante o formato correto para inserção
-    df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';').str.upper()
-    
-    # Tenta converter Lat/Lon para numérico e remove linhas com falha (trata vírgula como separador decimal)
-    df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_import['Latitude_Corrigida'] = pd.to_numeric(df_import['Latitude_Corrigida'], errors='coerce')
-    df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
-    df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
-    
-    if df_import.empty:
-        st.warning("Nenhum dado válido de correção (Lat/Lon) foi encontrado no arquivo para importar.")
-        return 0
-        
-    insert_count = 0
-    try:
-        with st.spinner(f"Processando a importação de {len(df_import)} linhas corrigidas..."):
-            cursor = conn.cursor()
-            upsert_query = f"""
-            INSERT OR REPLACE INTO {TABLE_NAME} 
-            (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-            VALUES (?, ?, ?);
-            """
-            data_to_insert = df_import[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].values.tolist()
-            cursor.executemany(upsert_query, data_to_insert)
-            insert_count = cursor.rowcount
-            
-            conn.commit()
-            load_geoloc_cache.clear()
-            count_after = len(load_geoloc_cache(conn))
-            
-            st.success(f"Importação de correções concluída! **{insert_count}** entradas processadas (novas ou atualizadas). O cache agora tem **{count_after}** entradas.")
-            st.rerun() 
-            return count_after
-            
-    except Exception as e:
-        st.error(f"Erro crítico ao inserir dados corrigidos no cache. Erro: {e}")
-        return 0
-
         
 def clear_geoloc_cache_db(conn):
     query = f"DELETE FROM {TABLE_NAME};"
@@ -251,16 +206,23 @@ def clear_geoloc_cache_db(conn):
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
 # ===============================================
 
-# --- NOVA FUNÇÃO: Conversão de Plus Code ---
-def converter_plus_code(plus_code: str):
-    """Converte um Plus Code (Open Location Code) em Lat/Lon."""
-    try:
-        # A decodificação retorna um objeto LatLngRectangle
-        decoded = olc.decode(plus_code.strip())
-        # getCenter() fornece o ponto central (lat, lon)
-        return decoded.getCenter().latitude, decoded.getCenter().longitude
-    except Exception:
-        return None, None
+# NOVO: Função para calcular o Plus Code
+def calcular_plus_code(df):
+    """Calcula o Plus Code (Open Location Code) para cada linha."""
+    # Garante que as colunas sejam numéricas (necessário para o olc.encode)
+    df[COLUNA_LATITUDE] = pd.to_numeric(df[COLUNA_LATITUDE], errors='coerce')
+    df[COLUNA_LONGITUDE] = pd.to_numeric(df[COLUNA_LONGITUDE], errors='coerce')
+
+    def generate_code(row):
+        lat = row[COLUNA_LATITUDE]
+        lon = row[COLUNA_LONGITUDE]
+        if pd.notna(lat) and pd.notna(lon):
+            # OLC padrão com 10 dígitos (10 metros de precisão)
+            return olc.encode(lat, lon, length=10) 
+        return ""
+    
+    df[COLUNA_PLUS_CODE] = df.apply(generate_code, axis=1)
+    return df
 
 
 def limpar_endereco(endereco):
@@ -289,7 +251,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df = df_entrada.copy()
     corrected_addresses = [] 
     
-    # Normalização de dados e criação da Chave de Cache
     df[COLUNA_BAIRRO] = df[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
@@ -298,23 +259,18 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         df[COLUNA_ENDERECO].astype(str).str.strip() + 
         ', ' + 
         df[COLUNA_BAIRRO].astype(str).str.strip()
-    ).str.replace(r',\s*$', '', regex=True).str.replace(r',\s*,', ',', regex=True).str.upper() # UPPER para match com o cache
+    )
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*$', '', regex=True)
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*,', ',', regex=True)
+
     
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
 
     
-    # --------------------------------------------------------------------------------------------------
     # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
-    # --------------------------------------------------------------------------------------------------
-    df['Geoloc_Corrigida'] = False # Flag para rastrear se a Lat/Lon foi corrigida/definida
-    
     if not df_cache_geoloc.empty:
-        # Garante que as chaves do cache também estejam em UPPER
-        df_cache_lookup = df_cache_geoloc.copy()
-        df_cache_lookup['Endereco_Completo_Cache'] = df_cache_lookup['Endereco_Completo_Cache'].str.upper()
-        
-        df_cache_lookup = df_cache_lookup.rename(columns={
+        df_cache_lookup = df_cache_geoloc.rename(columns={
             'Endereco_Completo_Cache': 'Chave_Cache_DB', 
             'Latitude_Corrigida': 'Cache_Lat',
             'Longitude_Corrigida': 'Cache_Lon'
@@ -331,48 +287,16 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         cache_mask = df['Cache_Lat'].notna()
         df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
         df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
-        df.loc[cache_mask, 'Geoloc_Corrigida'] = True
         corrected_addresses = df.loc[cache_mask, 'Chave_Cache_DB'].unique().tolist()
         
-        df = df.drop(columns=['Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
+        df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon'], errors='ignore')
     
-    # --------------------------------------------------------------------------------------------------
-    # NOVO PASSO: CONVERTER PLUS CODE (se a geolocalização ainda estiver faltando)
-    # --------------------------------------------------------------------------------------------------
-    
-    # Máscara para endereços que ainda não têm Lat/Lon E cuja coluna de Lat/Lon parece um Plus Code
-    plus_code_mask = (
-        (~df['Geoloc_Corrigida']) & # Ainda não corrigido pelo cache
-        (df[COLUNA_LATITUDE].astype(str).str.contains(r'\+', na=False)) # Contém um '+'
-    )
-    
-    if plus_code_mask.any():
-        st.info("Detectados Plus Codes: Tentando conversão em Lat/Lon...")
-        df_plus_codes = df[plus_code_mask].copy()
-        
-        def apply_plus_code_conversion(row):
-            # O Plus Code está na coluna de Latitude (que é o campo que o My Maps usa para exportar)
-            plus_code_str = str(row[COLUNA_LATITUDE])
-            return converter_plus_code(plus_code_str)
-
-        # Aplica a conversão
-        df_plus_codes[['New_Lat', 'New_Lon']] = df_plus_codes.apply(apply_plus_code_conversion, axis=1, result_type='expand')
-        
-        # Atualiza o DF principal apenas onde a conversão funcionou
-        successful_conversion_mask = df_plus_codes['New_Lat'].notna()
-        if successful_conversion_mask.any():
-            valid_indices = df_plus_codes[successful_conversion_mask].index
-            df.loc[valid_indices, COLUNA_LATITUDE] = df_plus_codes.loc[valid_indices, 'New_Lat']
-            df.loc[valid_indices, COLUNA_LONGITUDE] = df_plus_codes.loc[valid_indices, 'New_Lon']
-            df.loc[valid_indices, 'Geoloc_Corrigida'] = True
-            st.success(f"Conversão de Plus Code concluída para **{len(valid_indices)}** entradas.")
+    # NOVO PASSO: GERAR PLUS CODE APÓS O CACHE DE GEOLOC
+    df = calcular_plus_code(df)
+    st.info("Plus Codes (Open Location Codes) calculados para todas as entradas.")
 
 
-    df = df.drop(columns=['Chave_Busca_Cache', 'Geoloc_Corrigida'], errors='ignore')
-
-    # --------------------------------------------------------------------------------------------------
     # PASSO 2: FUZZY MATCHING (CORREÇÃO DE ENDEREÇO E AGRUPAMENTO)
-    # --------------------------------------------------------------------------------------------------
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
@@ -422,6 +346,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
         Latitude=(COLUNA_LATITUDE, 'first'),
         Longitude=(COLUNA_LONGITUDE, 'first'),
+        Plus_Code_Agrupado=(COLUNA_PLUS_CODE, 'first'), # NOVO: Agrupa o Plus Code
         Bairro_Agrupado=(COLUNA_BAIRRO, get_most_common_or_empty),
         Zipcode_Agrupado=('Zipcode/Postal code', get_most_common_or_empty),
         Min_Sequence=('Sequence_Num', 'min') 
@@ -439,10 +364,12 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     endereco_completo_circuit = endereco_completo_circuit.str.replace(r',\s*$', '', regex=True) 
     
     # A coluna de Notes deve conter o Order ID e outras infos
+    # NOVO: Inclui o Plus Code na coluna Notes (antes do CEP)
     notas_completas = (
         df_agrupado['Sequences_Agrupadas'] + '; ' +
         'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(int).astype(str) + 
         ' | Cidade: ' + df_agrupado['City'] + 
+        ' | Plus Code: ' + df_agrupado['Plus_Code_Agrupado'].astype(str) + # NOVO: Adiciona o Plus Code
         ' | CEP: ' + df_agrupado['Zipcode_Agrupado']
     )
     
@@ -452,7 +379,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Address': endereco_completo_circuit, 
         'Latitude': df_agrupado['Latitude'], 
         'Longitude': df_agrupado['Longitude'], 
-        'Notes': notas_completas
+        'Notes': notas_completas,
+        COLUNA_PLUS_CODE: df_agrupado['Plus_Code_Agrupado'] # NOVO: Adiciona a coluna separada
     }) 
     
     # Adicionando uma coluna 'Sequence_Base' para manter a ordem de importação, se for usado o split
@@ -462,7 +390,7 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
 
 
 # ===============================================
-# FUNÇÕES DE SPLIT DE ROTAS
+# FUNÇÃO DE SPLIT DE ROTAS
 # ===============================================
 
 def split_dataframe_for_drivers(df_circuit, num_motoristas):
@@ -474,7 +402,8 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         return {}
     
     # Garante que as colunas essenciais para importação do Circuit estejam presentes
-    COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes']
+    # INCLUI COLUNA_PLUS_CODE para exportação no Split
+    COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes', COLUNA_PLUS_CODE]
     df_export = df_circuit[['Sequence_Base'] + COLUNAS_EXPORT_SPLIT].copy()
     
     df_export.rename(columns={'Notes': 'Notes', 'Address': 'Address'}, inplace=True)
@@ -503,8 +432,8 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
         # Remove a coluna 'Sequence_Base' antes de exportar
         df_motorista = df_motorista.drop(columns=['Sequence_Base'])
         
-        # Colunas finais para exportação
-        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']]
+        # Colunas finais para exportação (Inclui Plus Code)
+        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes', COLUNA_PLUS_CODE]]
         
         # Nome da Rota (com contagem de paradas)
         rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
@@ -516,6 +445,7 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
+# (Código Omitido para Brevidade)
 # ===============================================
 
 def is_not_purely_volumous(ids_string):
@@ -560,7 +490,7 @@ def processar_rota_para_impressao(df_input):
     df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].str.strip('"')
     
     # 1. Separa o campo 'Notes' pelo PONTO E VÍRGULA
-    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | CEP: 80000000'
+    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | Plus Code: 5889+9F | CEP: 80000000'
     df_split = df[COLUNA_NOTES_CIRCUIT].str.split(';', n=1, expand=True)
     df['Ordem ID'] = df_split[0].str.strip() 
     
@@ -571,14 +501,16 @@ def processar_rota_para_impressao(df_input):
     # POIS O ID JÁ ESTÁ LIMPO NO CAMPO 'Ordem ID'
     df['ID_Pacote_Limpo'] = df['Ordem ID'].str.strip() 
     
+    # INCLUI O ADDRESS CLEAN (Endereço da parada) NA LISTA DE IMPRESSÃO
+    df['Address_Clean'] = df[COLUNA_ADDRESS_CIRCUIT].astype(str)
+    
     df['Lista de Impressão'] = (
         df['Ordem ID'].astype(str) + 
         ' - ' + 
-        df['Anotações Completas'].astype(str)
+        df['Address_Clean'].astype(str) + 
+        ' | ' +
+        df['Anotações Completas'].astype(str) # Inclui cidade, plus code, cep, etc.
     )
-    
-    # Adiciona a coluna de endereço para visualização na lista de impressão
-    df['Address_Clean'] = df[COLUNA_ADDRESS_CIRCUIT].astype(str)
     
     coluna_filtro = 'ID_Pacote_Limpo' 
     
@@ -597,7 +529,6 @@ def processar_rota_para_impressao(df_input):
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'Address_Clean']].copy()
     
     # Retorna o DF original *limpo* (com colunas normalizadas) para o Split, se necessário
-    # NOTA: df_limpo_para_split_pos não é mais usado no split, mas mantido por segurança.
     df_limpo_para_split_pos = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
     df_limpo_para_split_pos.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
     
@@ -606,6 +537,7 @@ def processar_rota_para_impressao(df_input):
 
 # ===============================================
 # INTERFACE PRINCIPAL
+# (Código Omitido para Brevidade)
 # ===============================================
 
 # 1. Conexão com o Banco de Dados (Executada uma vez)
@@ -638,7 +570,7 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)**, converte **Plus Codes** (se houver) e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -753,7 +685,7 @@ with tab1:
             df_cache = load_geoloc_cache(conn)
 
             result = None 
-            with st.spinner('Aplicando cache 100% match, convertendo Plus Codes e processando dados...'):
+            with st.spinner('Aplicando cache 100% match, Plus Code e processando dados...'): # Texto do spinner atualizado
                  try:
                      result = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
                  except Exception as e:
@@ -868,7 +800,8 @@ with tab_split:
                 # Prepara o arquivo Excel individual
                 buffer_individual = io.BytesIO()
                 with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
-                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
+                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes', 'Plus_Code'
+                    # O Circuit precisa apenas das 5 colunas principais, mas vamos incluir o Plus Code na aba.
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
@@ -893,6 +826,7 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# (Mantido o fluxo de carregamento de arquivo, pois o input é a SAÍDA DO CIRCUIT)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -1052,6 +986,7 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
+# (Código Omitido para Brevidade)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1074,7 +1009,6 @@ def apply_google_coords():
     coord_string_clean = coord_string.strip()
     
     try:
-        # Tenta encontrar formato de ponto e vírgula
         matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
         
         if len(matches) >= 2:
@@ -1200,27 +1134,7 @@ with tab3:
     
     st.markdown("---")
     
-    # --- NOVO RECURSO: IMPORTAR CORREÇÕES DO GOOGLE MY MAPS (4.2) ---
-    st.subheader("4.2 Importar Correções do Google My Maps (CSV) 🗺️")
-    st.warning(f"O arquivo deve ser o CSV exportado do My Maps, contendo as colunas **'Destination Address'**, **'Latitude'** e **'Longitude'** corrigidas.")
-    
-    uploaded_corrections = st.file_uploader(
-        "Arraste e solte o arquivo CSV CORRIGIDO do Google My Maps aqui:", 
-        type=['csv'],
-        key="upload_maps_corrections"
-    )
-    
-    if uploaded_corrections is not None:
-        if st.button("⬆️ Importar Correções de Geocodificação", key="btn_import_maps_corrections"):
-            if uploaded_corrections.name.lower().endswith('.csv'):
-                import_google_maps_corrections(conn, uploaded_corrections)
-            else:
-                st.error("Por favor, carregue um arquivo no formato **CSV**.")
-    
-    st.markdown("---")
-
-
-    st.subheader(f"4.3 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
+    st.subheader(f"4.2 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
     st.caption("Esta tabela mostra os dados atualmente salvos. Use o formulário acima para adicionar ou substituir entradas.")
     
     st.dataframe(df_cache_original, use_container_width=True) 
@@ -1228,8 +1142,8 @@ with tab3:
     st.markdown("---")
     
     
-    # --- BACKUP E RESTAURAÇÃO (agora 4.4) ---
-    st.header("4.4 Backup e Restauração do Cache")
+    # --- BACKUP E RESTAURAÇÃO ---
+    st.header("4.3 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
     col_backup, col_restauracao = st.columns(2)
@@ -1271,14 +1185,13 @@ with tab3:
         if uploaded_backup is not None:
             if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
                 with st.spinner('Restaurando dados do arquivo...'):
-                    # Mantido import_cache_to_db para o formato de backup padrão do app
-                    import_cache_to_db(conn, uploaded_backup) 
+                    import_cache_to_db(conn, uploaded_backup)
                     
     # ----------------------------------------------------------------------------------
     # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO)
     # ----------------------------------------------------------------------------------
     st.markdown("---")
-    st.header("4.5 Limpar TODO o Cache de Geolocalização")
+    st.header("4.4 Limpar TODO o Cache de Geolocalização")
     st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas.")
     
     if len(df_cache_original) > 0:

@@ -1311,4 +1311,25 @@ with tab3:
         )
         
         if uploaded_backup is not None:
-            if st.button("⬆️
+            if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
+                with st.spinner('Restaurando dados do arquivo...'):
+                    import_cache_to_db(conn, uploaded_backup)
+                    
+    # ----------------------------------------------------------------------------------
+    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO) (4.6)
+    # ----------------------------------------------------------------------------------
+    st.markdown("---")
+    st.header("4.6 Limpar TODO o Cache de Geolocalização")
+    st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas.")
+    
+    if len(df_cache_original) > 0:
+        confirm_clear = st.checkbox(
+            f"Eu confirmo que desejo excluir permanentemente **{len(df_cache_original)}** entradas do cache.", 
+            key="confirm_clear_cache"
+        )
+        
+        if confirm_clear:
+            if st.button("🔴 EXCLUIR TODOS OS DADOS DO CACHE AGORA", key="btn_final_clear_cache"):
+                clear_geoloc_cache_db(conn)
+    else:
+        st.info("O cache já está vazio. Não há dados para excluir.")

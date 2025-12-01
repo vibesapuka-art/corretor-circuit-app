@@ -1256,25 +1256,49 @@ with tab3:
     col_backup, col_restauracao = st.columns(2)
     
     with col_backup:
-        st.markdown("#### 📥 Fazer Backup (Download)")
-        st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
+        # ... (código anterior)
+
+def export_cache(df_cache):
+    buffer = io.BytesIO()
+    
+    # NOVO: Isola e verifica o DataFrame que será exportado
+    df_to_export = df_cache[CACHE_COLUMNS] 
+    
+    # NOVO: Se, por algum motivo, o DF de exportação for vazio, evita o erro do OpenPyXL
+    if df_to_export.empty:
+        return None
         
-        def export_cache(df_cache):
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                # O backup agora inclui a nova coluna
-                df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
-            buffer.seek(0)
-            return buffer
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+        # Usa o DF verificado
+        df_to_export.to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
+    buffer.seek(0)
+    return buffer
             
-        if not df_cache_original.empty:
-            backup_file = export_cache(df_cache_original)
+# ... (código anterior)
+
+with col_backup:
+    st.markdown("#### 📥 Fazer Backup (Download)")
+    st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
+        
+    # ... (código anterior)
+            
+    if not df_cache_original.empty:
+        backup_file = export_cache(df_cache_original)
+            
+        # NOVO: Verifica se a função de exportação retornou um buffer válido
+        if backup_file is not None: 
             st.download_button(
                 label="⬇️ Baixar Backup do Cache (.xlsx)",
                 data=backup_file,
                 file_name="cache_geolocalizacao_backup.xlsx",
                 mime=EXCEL_MIME_TYPE, 
                 key="download_backup"
+            )
+        else:
+             st.warning("O cache foi considerado vazio após a filtragem de colunas para exportação. Tente recarregar a página.")
+
+# ... (restante do código)
+
             )
         else:
             st.warning("O cache está vazio, não há dados para baixar.")
@@ -1313,3 +1337,4 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
+

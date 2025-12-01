@@ -7,44 +7,10 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
+import zipfile # Adicionado
+import xml.etree.ElementTree as ET # Adicionado
 
-
-# --- Configurações Iniciais da Página ---
-st.set_page_config(
-    page_title="Circuit Flow Completo",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
-st.markdown("""
-<style>
-/* Estilo para garantir alinhamento à esquerda em textareas e inputs */
-.stTextArea [data-baseweb="base-input"], 
-.stTextInput [data-baseweb="base-input"] {
-    text-align: left;
-    font-family: monospace;
-}
-div.stTextArea > label,
-div.stTextInput > label {
-    text-align: left !important; 
-}
-div[data-testid="stTextarea"] textarea {
-    text-align: left !important; 
-    font-family: monospace;
-    white-space: pre-wrap;
-}
-h1, h2, h3, h4, .stMarkdown {
-    text-align: left !important;
-}
-.ag-header-cell-text {
-    white-space: normal !important;
-    line-height: 1.2 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-# --------------------------------------------------------------------------------------
-
+# [ ... O restante do seu código de configurações e variáveis globais ... ]
 
 # --- Configurações Globais (Colunas) ---
 COLUNA_ENDERECO = 'Destination Address'
@@ -70,6 +36,7 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
+# (Mantidas do Código Anterior)
 # ===============================================
 
 @st.cache_resource
@@ -144,9 +111,6 @@ def import_cache_to_db(conn, uploaded_file):
     df_import['Longitude_Corrigida'] = pd.to_numeric(df_import['Longitude_Corrigida'], errors='coerce')
     df_import = df_import.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
     
-    # Remove duplicatas pela chave, priorizando o último (importado)
-    df_import = df_import.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
-    
     if df_import.empty:
         st.warning("Nenhum dado válido de correção (Lat/Lon) foi encontrado no arquivo para importar.")
         return 0
@@ -169,65 +133,11 @@ def import_cache_to_db(conn, uploaded_file):
             conn.commit()
             load_geoloc_cache.clear()
             count_after = len(load_geoloc_cache(conn))
-            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas/atualizadas. O cache agora tem **{count_after}** entradas.")
+            st.success(f"Importação de backup concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
             st.rerun() 
             return count_after
     except Exception as e:
         st.error(f"Erro crítico ao inserir dados no cache. Erro: {e}")
-        return 0
-
-# Função para importar o arquivo de correções do Google Maps (e gerar o formato Cache)
-def import_google_maps_corrections(conn, uploaded_file):
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df_import = pd.read_csv(uploaded_file)
-        else: 
-            df_import = pd.read_excel(uploaded_file, sheet_name=0)
-    except Exception as e:
-        st.error(f"Erro ao ler o arquivo: {e}")
-        return 0
-    
-    try:
-        df_import = generate_cache_df_from_input(df_import)
-    except KeyError as ke:
-        st.error(f"{ke}")
-        return 0
-    except Exception as e:
-        st.error(f"Erro ao processar o arquivo de entrada: {e}")
-        return 0
-
-    if df_import.empty:
-        st.warning("Nenhum dado válido de correção (Lat/Lon e Endereço) foi encontrado no arquivo para importar.")
-        return 0
-        
-    # 4. Inserção no Banco de Dados (Upsert)
-    insert_count = 0
-    try:
-        with st.spinner(f"Processando a importação de {len(df_import)} correções do Google Maps..."):
-            
-            for index, row in df_import.iterrows():
-                endereco = row['Endereco_Completo_Cache']
-                lat = row['Latitude_Corrigida']
-                lon = row['Longitude_Corrigida']
-                
-                # A chave primária garantirá o REPLACE se o endereço já existir (UPSERT)
-                upsert_query = f"""
-                INSERT OR REPLACE INTO {TABLE_NAME} 
-                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-                VALUES (?, ?, ?);
-                """
-                conn.execute(upsert_query, (endereco, lat, lon))
-                insert_count += 1
-            
-            conn.commit()
-            load_geoloc_cache.clear()
-            count_after = len(load_geoloc_cache(conn))
-            st.success(f"Importação de correções do Google Maps concluída! **{insert_count}** entradas processadas/atualizadas. O cache agora tem **{count_after}** entradas.")
-            st.rerun() 
-            return count_after
-            
-    except Exception as e:
-        st.error(f"Erro crítico ao inserir dados do Google Maps no cache. Erro: {e}")
         return 0
         
 def clear_geoloc_cache_db(conn):
@@ -240,119 +150,134 @@ def clear_geoloc_cache_db(conn):
         st.rerun() 
     except Exception as e:
         st.error(f"❌ Erro ao limpar o cache: {e}")
-        
-        
-# ===============================================
-# NOVA FUNÇÃO DE CONVERSÃO PARA CACHE 
-# ===============================================
-
-def generate_cache_df_from_input(df_entrada):
-    """
-    Converte um DataFrame de entrada (formato Circuit/Google Maps)
-    para o formato de Cache de Geolocalização.
-    """
-    
-    # As colunas globais de entrada são usadas como base
-    required_gmaps_cols = [COLUNA_ENDERECO, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO]
-    
-    if not all(col in df_entrada.columns for col in required_gmaps_cols):
-        raise KeyError(f"Erro de Coluna: O arquivo deve conter as colunas: {', '.join(required_gmaps_cols)}")
-    
-    df_export = df_entrada.copy()
-    
-    # 1. Criação da Chave de Cache (Endereço + Bairro)
-    df_export[COLUNA_BAIRRO] = df_export[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
-    
-    # Cria a chave de cache usando a mesma lógica do processamento (Endereço + Bairro)
-    df_export['Endereco_Completo_Cache'] = (
-        df_export[COLUNA_ENDERECO].astype(str).str.strip() + 
-        ', ' + 
-        df_export[COLUNA_BAIRRO].astype(str).str.strip()
-    )
-    # Limpa vírgulas extras no final ou duplas
-    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True)
-    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
-    
-    # 2. Renomear colunas de coordenadas para o formato do cache
-    df_export.rename(columns={
-        COLUNA_LATITUDE: 'Latitude_Corrigida',
-        COLUNA_LONGITUDE: 'Longitude_Corrigida'
-    }, inplace=True)
-    
-    # 3. Limpeza e conversão de dados (Garante que só haja as colunas do cache)
-    df_export = df_export[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
-    
-    df_export['Endereco_Completo_Cache'] = df_export['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
-    df_export['Latitude_Corrigida'] = df_export['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_export['Longitude_Corrigida'] = df_export['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
-    df_export['Latitude_Corrigida'] = pd.to_numeric(df_export['Latitude_Corrigida'], errors='coerce')
-    df_export['Longitude_Corrigida'] = pd.to_numeric(df_export['Longitude_Corrigida'], errors='coerce')
-    df_export = df_export.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida', 'Endereco_Completo_Cache'])
-    
-    # Remove duplicatas de chave (para criar um cache limpo e único)
-    df_export = df_export.drop_duplicates(subset=['Endereco_Completo_Cache'], keep='last')
-
-    return df_export
 
 
 # ===============================================
-# FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
+# NOVA FUNÇÃO: PROCESSAMENTO DE ARQUIVOS KML/KMZ
 # ===============================================
 
-# 💡 NOVA FUNÇÃO DE CORREÇÃO DE CSV DE COLUNA ÚNICA
-def fix_single_column_csv(uploaded_file, required_cols):
+def processar_kml_kmz(uploaded_file):
     """
-    Tenta corrigir um CSV que foi lido com todos os dados em uma única coluna.
+    Processa arquivos KML ou KMZ para extrair endereços (Name) e coordenadas (Point).
+    Retorna um DataFrame pronto para importação no cache.
     """
-    try:
-        # Tenta reler o CSV forçando a leitura como uma única coluna (sem header)
-        # O arquivo precisa ser rebobinado antes da releitura
+    enderecos_cache = []
+    
+    # 1. LER O CONTEÚDO KML
+    kml_content = None
+    file_extension = uploaded_file.name.lower().split('.')[-1]
+    
+    if file_extension == 'kml':
         uploaded_file.seek(0)
-        df_single = pd.read_csv(uploaded_file, header=None, encoding='utf-8')
+        kml_content = uploaded_file.read()
+    elif file_extension == 'kmz':
+        try:
+            with zipfile.ZipFile(uploaded_file, 'r') as z:
+                # O arquivo KML principal é geralmente o doc.kml
+                for name in z.namelist():
+                    if name.lower().endswith('.kml'):
+                        kml_content = z.read(name)
+                        break
+            if kml_content is None:
+                st.error("KMZ não contém um arquivo KML válido (.kml).")
+                return pd.DataFrame(columns=CACHE_COLUMNS)
+        except Exception as e:
+            st.error(f"Erro ao descompactar KMZ: {e}")
+            return pd.DataFrame(columns=CACHE_COLUMNS)
+    else:
+        st.error("Formato de arquivo não suportado. Por favor, use KML ou KMZ.")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    
+    # 2. PARSEAR O XML (KML)
+    try:
+        # Define o namespace KML para buscas (necessário para ElementTree)
+        kml_namespace = '{http://www.opengis.net/kml/2.2}'
+        
+        # O KML pode ter uma declaração XML, precisamos decodificar e tentar limpar a string para o parser
+        if isinstance(kml_content, bytes):
+            kml_content = kml_content.decode('utf-8', errors='ignore')
+            
+        # O parser pode reclamar de caracteres inválidos. Tentativa de parse
+        root = ET.fromstring(kml_content)
+        
+        # Buscar por todas as tags <Placemark>
+        for placemark in root.findall(f".//{kml_namespace}Placemark"):
+            
+            endereco = placemark.find(f"{kml_namespace}name")
+            point = placemark.find(f"{kml_namespace}Point/{kml_namespace}coordinates")
+            
+            if endereco is not None and point is not None and point.text:
+                
+                # O formato é Longitude, Latitude, Altura
+                coords = point.text.strip().split(',')
+                
+                if len(coords) >= 2:
+                    try:
+                        lon = float(coords[0].strip())
+                        lat = float(coords[1].strip())
+                        
+                        # O Endereço (Name) do Placemark será a nossa Chave de Cache
+                        endereco_limpo = endereco.text.strip().rstrip(';')
+                        
+                        # Verifica se as coordenadas parecem válidas
+                        if -90 <= lat <= 90 and -180 <= lon <= 180:
+                            enderecos_cache.append({
+                                'Endereco_Completo_Cache': endereco_limpo,
+                                'Latitude_Corrigida': lat,
+                                'Longitude_Corrigida': lon
+                            })
+                        
+                    except ValueError:
+                        # Ignora placemarks com coordenadas inválidas
+                        continue
+                        
+        if not enderecos_cache:
+            st.warning("Nenhuma coordenada válida (Point) encontrada nos Placemarks do arquivo KML/KMZ.")
+            return pd.DataFrame(columns=CACHE_COLUMNS)
+            
+        return pd.DataFrame(enderecos_cache)
+
+    except ET.ParseError as pe:
+        st.error(f"Erro de parsing KML: O arquivo KML/KMZ não está no formato XML esperado. Erro: {pe}")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
-        # Se a releitura falhar, retorna None para tentar outras opções
-        return None
-
-    # Se realmente só tem 1 coluna, tentamos o split
-    if df_single.shape[1] == 1:
-        
-        # Assume que o separador é a vírgula (,) e o delimitador de texto é aspas (")
-        # O padrão do seu CSV parece ser delimitado por aspas
-        
-        # 1. Remove as aspas no início e fim de cada linha se existirem
-        df_single[0] = df_single[0].astype(str).str.strip().str.strip('"')
-        
-        # 2. Tenta fazer o 'Texto para Colunas' usando a vírgula como delimitador
-        df_split = df_single[0].str.split(',', expand=True)
-
-        # Se o split criou colunas suficientes
-        if df_split.shape[1] >= len(required_cols):
-            
-            # Tenta usar a primeira linha para mapear o nome das colunas
-            # Já que o pandas leu a primeira linha como dado (porque header=None)
-            
-            # Remove a primeira linha para usar como cabeçalho
-            header_row = df_split.iloc[0].tolist()
-            # O cabeçalho pode estar 'limpo', mas pode não ser idêntico ao exigido
-            
-            # Vamos usar os nomes das colunas exigidas, assumindo a ordem do arquivo de entrada
-            df_fixed = df_split[1:].copy()
-            
-            # Limita ao número de colunas exigidas e define os nomes
-            df_fixed = df_fixed.iloc[:, :len(required_cols)]
-            df_fixed.columns = required_cols 
-
-            # Converte a primeira linha (cabeçalho) em um novo DataFrame e concatena
-            # Isso é crucial para que o resto do código funcione, pois ele espera nomes específicos.
-            df_fixed = pd.DataFrame([header_row[:len(required_cols)]], columns=required_cols).append(df_fixed, ignore_index=True)
+        st.error(f"Erro inesperado durante o processamento do KML/KMZ: {e}")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
 
 
-            # Uma última verificação para ver se as colunas exigidas estão presentes
-            if all(col in df_fixed.columns for col in required_cols):
-                st.info("✅ **Correção Automática Aplicada:** O arquivo foi lido como coluna única e corrigido (split) usando a vírgula.")
-                return df_fixed
+def import_kml_df_to_db(conn, df_import):
+    """
+    Função auxiliar para salvar o DF gerado pelo KML/KMZ no banco de dados.
+    """
+    insert_count = 0
+    try:
+        with st.spinner(f"Processando a importação de {len(df_import)} correções do KML/KMZ..."):
+            for index, row in df_import.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
+                VALUES (?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon))
+                insert_count += 1
             
-    return None # Retorna None se a correção falhar
+            conn.commit()
+            load_geoloc_cache.clear()
+            count_after = len(load_geoloc_cache(conn))
+            st.success(f"Importação de KML/KMZ concluída! **{insert_count}** entradas adicionadas/atualizadas. O cache agora tem **{count_after}** entradas.")
+            st.rerun() 
+            return count_after
+    except Exception as e:
+        st.error(f"Erro crítico ao inserir dados do KML/KMZ no cache. Erro: {e}")
+        return 0
+
+
+# ===============================================
+# [ ... O restante do seu código (limpar_endereco, get_most_common_or_empty, processar_e_corrigir_dados, split_dataframe_for_drivers, is_not_purely_volumous, processar_rota_para_impressao) ... ]
+# ===============================================
 
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -699,23 +624,12 @@ with tab1:
 
     if uploaded_file_pre is not None:
         try:
-            df_input_pre = None
-            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
-            
             if uploaded_file_pre.name.endswith('.csv'):
-                # Tenta leitura normal de CSV
                 df_input_pre = pd.read_csv(uploaded_file_pre)
-                
-                # Se a leitura normal falhar (menos colunas que o esperado), tenta a correção
-                if len(df_input_pre.columns) < len(colunas_essenciais):
-                    uploaded_file_pre.seek(0) # Volta o ponteiro do arquivo para o início
-                    df_fixed = fix_single_column_csv(uploaded_file_pre, colunas_essenciais)
-                    if df_fixed is not None:
-                        df_input_pre = df_fixed
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
             for col in colunas_essenciais:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
@@ -731,7 +645,7 @@ with tab1:
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
         except KeyError as ke:
-             st.error(f"Erro de Coluna: {ke}. Verifique se as colunas estão nomeadas corretamente: {', '.join(colunas_essenciais)}")
+             st.error(f"Erro de Coluna: {ke}")
              st.session_state['df_original'] = None
              st.session_state['df_circuit_agrupado_pre'] = None
         except Exception as e:
@@ -1111,7 +1025,7 @@ with tab2:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (Seções reenumeradas)
+# ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (COM NOVO UPLOAD KML/KMZ)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1137,8 +1051,8 @@ def apply_google_coords():
         matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
         
         if len(matches) >= 2:
-            lat = float(matches[0].replace(',', '.'))
-            lon = float(matches[1].replace(',', '.'))
+            lat = float(matches[0].replace(',', '.').strip())
+            lon = float(matches[1].replace(',', '.').strip())
             
             st.session_state['form_new_lat_num'] = lat
             st.session_state['form_new_lon_num'] = lon
@@ -1169,8 +1083,35 @@ with tab3:
     df_cache_original = load_geoloc_cache(conn).fillna("")
     
     
-    # --- Formulário de Entrada Rápida ---
-    st.subheader("4.1 Adicionar Nova Correção Rápida")
+    # --- NOVO BLOCO KML/KMZ ---
+    st.subheader("4.1 Importar Correções por KML/KMZ (Google Maps)")
+    st.caption("Use este bloco para importar correções de geolocalização feitas no Google Maps ou Google Earth.")
+    
+    uploaded_kml_kmz = st.file_uploader(
+        "Arraste e solte o arquivo KML ou KMZ aqui:", 
+        type=['kml', 'kmz'],
+        key="upload_kml_kmz"
+    )
+
+    if uploaded_kml_kmz is not None:
+        if st.button("⬆️ Importar Correções do KML/KMZ", key="btn_import_kml_kmz"):
+            with st.spinner(f"Processando arquivo '{uploaded_kml_kmz.name}'..."):
+                df_kml_data = processar_kml_kmz(uploaded_kml_kmz)
+                
+                if df_kml_data is not None and not df_kml_data.empty:
+                    st.success(f"Arquivo KML/KMZ processado! **{len(df_kml_data)}** correções encontradas.")
+                    st.dataframe(df_kml_data, use_container_width=True)
+                    
+                    if st.button("✅ Confirmar e Salvar Correções no Cache", key="btn_save_kml_to_db"):
+                         import_kml_df_to_db(conn, df_kml_data)
+                else:
+                    st.warning("Nenhum dado de correção extraído do arquivo.")
+    
+    st.markdown("---")
+    
+    
+    # --- Formulário de Entrada Rápida (Reajustado para 4.2) ---
+    st.subheader("4.2 Adicionar Nova Correção Rápida (Manual)")
     
     with st.container():
         
@@ -1259,7 +1200,7 @@ with tab3:
     
     st.markdown("---")
     
-    st.subheader(f"4.2 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
+    st.subheader(f"4.3 Visualização do Cache Salvo (Total: {len(df_cache_original)})")
     st.caption("Esta tabela mostra os dados atualmente salvos. Use o formulário acima para adicionar ou substituir entradas.")
     
     st.dataframe(df_cache_original, use_container_width=True) 
@@ -1267,77 +1208,8 @@ with tab3:
     st.markdown("---")
     
     
-    # --- BLOCO: IMPORTAÇÃO DE CORREÇÕES DO GOOGLE MAPS (4.3) ---
-    st.header("4.3 Importar Correções de Planilha (Google Maps/Circuit)")
-    st.info("Use o arquivo de rota do Google Maps ou uma planilha contendo as colunas **'Destination Address'**, **'Bairro'**, **'Latitude'** e **'Longitude'**.")
-    st.warning("O sistema cria a chave de cache combinando Endereço + Bairro e irá **substituir** entradas existentes se a chave for igual.")
-
-    uploaded_gmaps_correction = st.file_uploader(
-        "Arraste o arquivo de Correções aqui (CSV/Excel):", 
-        type=['csv', 'xlsx'],
-        key="upload_gmaps_correction"
-    )
-
-    if uploaded_gmaps_correction is not None:
-        if st.button("⬆️ Aplicar Correções da Planilha no Cache", key="btn_import_gmaps_correction"):
-            with st.spinner('Processando e aplicando correções da planilha...'):
-                import_google_maps_corrections(conn, uploaded_gmaps_correction)
-    
-    st.markdown("---")
-    
-    # --- NOVO BLOCO: CONVERSOR PARA FORMATO CACHE (4.4) ---
-    st.header("4.4 Converter Planilha para Formato Cache de Geolocalização")
-    st.info("Esta ferramenta pega sua planilha original e a formata **apenas** com as colunas: **Endereco\_Completo\_Cache**, **Latitude\_Corrigida** e **Longitude\_Corrigida**.")
-    st.caption("Use esta função para criar backups padronizados ou para gerar o 'arquivo cache' para outro sistema.")
-    
-    uploaded_file_to_convert = st.file_uploader(
-        "Arraste a planilha de entrada (que tem Endereço, Bairro, Lat e Lon) para converter:", 
-        type=['csv', 'xlsx'],
-        key="upload_file_to_convert"
-    )
-    
-    if uploaded_file_to_convert is not None:
-        if st.button("🔄 Gerar Arquivo no Formato Cache", key="btn_generate_cache_file"):
-            df_to_convert = None
-            try:
-                if uploaded_file_to_convert.name.endswith('.csv'):
-                    df_to_convert = pd.read_csv(uploaded_file_to_convert)
-                else: 
-                    df_to_convert = pd.read_excel(uploaded_file_to_convert, sheet_name=0)
-                
-                with st.spinner('Convertendo e formatando os dados...'):
-                    df_cache_format = generate_cache_df_from_input(df_to_convert)
-                
-                if df_cache_format.empty:
-                    st.warning("A conversão não gerou dados válidos (verifique se as colunas estão preenchidas).")
-                else:
-                    st.success(f"Conversão concluída! **{len(df_cache_format)}** entradas formatadas.")
-                    st.dataframe(df_cache_format, use_container_width=True)
-                    
-                    buffer_convert = io.BytesIO()
-                    with pd.ExcelWriter(buffer_convert, engine='openpyxl') as writer:
-                        df_cache_format.to_excel(writer, index=False, sheet_name='Formato_Cache_Padrao')
-                        
-                    buffer_convert.seek(0)
-                    
-                    st.download_button(
-                        label="⬇️ Baixar ARQUIVO CONVERTIDO (Formato Cache)",
-                        data=buffer_convert,
-                        file_name="planilha_convertida_para_cache.xlsx",
-                        mime=EXCEL_MIME_TYPE, 
-                        key="download_converted_cache"
-                    )
-                    
-            except KeyError as ke:
-                st.error(f"{ke}. Verifique as colunas de entrada.")
-            except Exception as e:
-                st.error(f"Erro ao processar o arquivo. Erro: {e}")
-
-    
-    st.markdown("---")
-    
-    # --- BACKUP E RESTAURAÇÃO (4.5) ---
-    st.header("4.5 Backup e Restauração do Cache")
+    # --- BACKUP E RESTAURAÇÃO (Reajustado para 4.4) ---
+    st.header("4.4 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
     col_backup, col_restauracao = st.columns(2)
@@ -1382,10 +1254,10 @@ with tab3:
                     import_cache_to_db(conn, uploaded_backup)
                     
     # ----------------------------------------------------------------------------------
-    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO) (4.6)
+    # BLOCO DE LIMPAR TODO O CACHE (COM CONFIRMAÇÃO) (Reajustado para 4.5)
     # ----------------------------------------------------------------------------------
     st.markdown("---")
-    st.header("4.6 Limpar TODO o Cache de Geolocalização")
+    st.header("4.5 Limpar TODO o Cache de Geolocalização")
     st.error("⚠️ **ÁREA DE PERIGO!** Esta ação excluirá PERMANENTEMENTE todas as suas correções salvas.")
     
     if len(df_cache_original) > 0:

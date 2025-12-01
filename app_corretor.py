@@ -297,8 +297,63 @@ def generate_cache_df_from_input(df_entrada):
 
 # ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
-# (Mantidas do Código Anterior)
 # ===============================================
+
+# 💡 NOVA FUNÇÃO DE CORREÇÃO DE CSV DE COLUNA ÚNICA
+def fix_single_column_csv(uploaded_file, required_cols):
+    """
+    Tenta corrigir um CSV que foi lido com todos os dados em uma única coluna.
+    """
+    try:
+        # Tenta reler o CSV forçando a leitura como uma única coluna (sem header)
+        # O arquivo precisa ser rebobinado antes da releitura
+        uploaded_file.seek(0)
+        df_single = pd.read_csv(uploaded_file, header=None, encoding='utf-8')
+    except Exception as e:
+        # Se a releitura falhar, retorna None para tentar outras opções
+        return None
+
+    # Se realmente só tem 1 coluna, tentamos o split
+    if df_single.shape[1] == 1:
+        
+        # Assume que o separador é a vírgula (,) e o delimitador de texto é aspas (")
+        # O padrão do seu CSV parece ser delimitado por aspas
+        
+        # 1. Remove as aspas no início e fim de cada linha se existirem
+        df_single[0] = df_single[0].astype(str).str.strip().str.strip('"')
+        
+        # 2. Tenta fazer o 'Texto para Colunas' usando a vírgula como delimitador
+        df_split = df_single[0].str.split(',', expand=True)
+
+        # Se o split criou colunas suficientes
+        if df_split.shape[1] >= len(required_cols):
+            
+            # Tenta usar a primeira linha para mapear o nome das colunas
+            # Já que o pandas leu a primeira linha como dado (porque header=None)
+            
+            # Remove a primeira linha para usar como cabeçalho
+            header_row = df_split.iloc[0].tolist()
+            # O cabeçalho pode estar 'limpo', mas pode não ser idêntico ao exigido
+            
+            # Vamos usar os nomes das colunas exigidas, assumindo a ordem do arquivo de entrada
+            df_fixed = df_split[1:].copy()
+            
+            # Limita ao número de colunas exigidas e define os nomes
+            df_fixed = df_fixed.iloc[:, :len(required_cols)]
+            df_fixed.columns = required_cols 
+
+            # Converte a primeira linha (cabeçalho) em um novo DataFrame e concatena
+            # Isso é crucial para que o resto do código funcione, pois ele espera nomes específicos.
+            df_fixed = pd.DataFrame([header_row[:len(required_cols)]], columns=required_cols).append(df_fixed, ignore_index=True)
+
+
+            # Uma última verificação para ver se as colunas exigidas estão presentes
+            if all(col in df_fixed.columns for col in required_cols):
+                st.info("✅ **Correção Automática Aplicada:** O arquivo foi lido como coluna única e corrigido (split) usando a vírgula.")
+                return df_fixed
+            
+    return None # Retorna None se a correção falhar
+
 def limpar_endereco(endereco):
     if pd.isna(endereco):
         return ""
@@ -644,12 +699,23 @@ with tab1:
 
     if uploaded_file_pre is not None:
         try:
+            df_input_pre = None
+            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
+            
             if uploaded_file_pre.name.endswith('.csv'):
+                # Tenta leitura normal de CSV
                 df_input_pre = pd.read_csv(uploaded_file_pre)
+                
+                # Se a leitura normal falhar (menos colunas que o esperado), tenta a correção
+                if len(df_input_pre.columns) < len(colunas_essenciais):
+                    uploaded_file_pre.seek(0) # Volta o ponteiro do arquivo para o início
+                    df_fixed = fix_single_column_csv(uploaded_file_pre, colunas_essenciais)
+                    if df_fixed is not None:
+                        df_input_pre = df_fixed
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
+            
             for col in colunas_essenciais:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
@@ -665,7 +731,7 @@ with tab1:
             st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
         except KeyError as ke:
-             st.error(f"Erro de Coluna: {ke}")
+             st.error(f"Erro de Coluna: {ke}. Verifique se as colunas estão nomeadas corretamente: {', '.join(colunas_essenciais)}")
              st.session_state['df_original'] = None
              st.session_state['df_circuit_agrupado_pre'] = None
         except Exception as e:

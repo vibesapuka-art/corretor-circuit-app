@@ -4,6 +4,7 @@ streamlit
 openpyxl
 streamlit-aggrid
 openlocationcode
-fastkml
+fastkml>=0.12
+
 
 

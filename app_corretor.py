@@ -8,6 +8,7 @@ import sqlite3
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
 from fastkml import kml # Biblioteca para ler arquivos KML/KMZ
+import zipfile # <-- NOVO: Necessário para o Plano B de descompactação de KMZ
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -227,7 +228,7 @@ def export_cache(df_cache, file_format='xlsx'):
 
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - FROM_BYTES)
+# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA COM PLANO B)
 # ===============================================
 
 @st.cache_data
@@ -237,16 +238,34 @@ def parse_kml_data(uploaded_file):
     file_bytes = uploaded_file.getvalue()
     k = kml.KML()
     
+    is_kmz = uploaded_file.name.lower().endswith('.kmz')
+    
     try:
-        # Tenta o parsing de KMZ (ZIP)
-        # k.from_bytes() é o método moderno para dados binários (KMZ ou KML lido como binário)
-        if uploaded_file.name.lower().endswith('.kmz'):
-            # CORREÇÃO: Usa o método from_bytes() para KMZ (compatível com versões mais novas)
-            k.from_bytes(file_bytes) 
+        if is_kmz:
+            # Tenta o método moderno/comum (from_bytes), que deveria funcionar na maioria das versões novas
+            try:
+                k.from_bytes(file_bytes) 
+            except AttributeError:
+                # CORREÇÃO: PLANO B - Se k.from_bytes() não existir (seu erro atual), tenta a Descompactação Manual do KMZ
+                st.info("Tentando descompactação manual do KMZ (Plano B) devido a erro de 'from_bytes'.")
+                with zipfile.ZipFile(io.BytesIO(file_bytes), 'r') as kmz_file:
+                    # O arquivo KML principal dentro do KMZ geralmente é doc.kml
+                    kml_name_list = [name for name in kmz_file.namelist() if name.endswith('.kml')]
+                    if not kml_name_list:
+                         raise IndexError("Nenhum arquivo .kml encontrado dentro do KMZ.")
+                    
+                    kml_name = kml_name_list[0]
+                    kml_content = kmz_file.read(kml_name)
+                    # Usa k.from_string() que é universal
+                    k.from_string(kml_content.decode('utf-8'))
         else:
             # Tenta o parsing de KML/XML como string UTF-8
             k.from_string(file_bytes.decode('utf-8')) 
             
+    except IndexError as ie:
+         # Captura erro se o KMZ estiver vazio ou não tiver um arquivo .kml dentro
+         st.error(f"Erro: O arquivo KMZ não contém um arquivo .kml principal. Detalhe: {ie}")
+         return pd.DataFrame()
     except Exception as e:
         # Erro durante o parsing (arquivo corrompido, formato inválido, etc.)
         st.error(f"Erro Crítico ao processar o arquivo. Verifique se ele é um KML/KMZ válido. Erro: {e}")
@@ -254,7 +273,7 @@ def parse_kml_data(uploaded_file):
     
     data = []
     
-    # --- BLOCO DE ITERAÇÃO MAIS SEGURO (CORREÇÃO DO TypeError) ---
+    # --- BLOCO DE ITERAÇÃO MAIS SEGURO ---
     try:
         # Tenta obter as features. Converte para lista antes de iterar para maior segurança.
         features_to_iterate = list(k.features())
@@ -876,7 +895,7 @@ with tab_split:
                 st.dataframe(df_rota, use_container_width=True)
                 
                 buffer_individual = io.BytesIO()
-                with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
+                with pd.ExcelWriter(buffer_individual, engine='openypxl') as writer:
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
@@ -893,6 +912,7 @@ with tab_split:
             
             st.markdown("---")
             st.info("Cada arquivo baixado contém a lista de paradas na ordem sequencial, com coordenadas, para ser otimizada individualmente no Circuit/Spoke.")
+
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)

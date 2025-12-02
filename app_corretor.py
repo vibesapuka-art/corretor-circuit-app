@@ -7,7 +7,7 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-from fastkml import kml # Biblioteca para ler arquivos KML
+from fastkml import kml # Biblioteca para ler arquivos KML/KMZ
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -70,7 +70,6 @@ PRIMARY_KEYS = ['Endereco_Completo_Cache']
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (INALTERADAS)
 # ===============================================
 
 @st.cache_resource
@@ -199,26 +198,27 @@ def clear_geoloc_cache_db(conn):
 
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ (MODIFICADA)
+# FUNÇÕES DE KML/KMZ/XML (ATUALIZADA)
 # ===============================================
 
 @st.cache_data
 def parse_kml_data(uploaded_file):
-    """Lê um arquivo KML ou KMZ e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
+    """Lê um arquivo KML, KMZ ou XML e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
     
     file_bytes = uploaded_file.getvalue()
     k = kml.KML()
     
     try:
-        # Tenta carregar o arquivo. O fastkml faz o parse KML e KMZ (ZIP) automaticamente
-        # se o KMZ for um único KML compactado.
+        # O fastkml faz o parse KML e KMZ (ZIP) automaticamente.
+        # Ele tentará ler qualquer XML/KML, independentemente da extensão.
         if uploaded_file.name.lower().endswith('.kmz'):
             k.from_bytes(file_bytes)
         else:
-            k.from_string(file_bytes.decode('utf-8'))
+            # Tenta decodificar como UTF-8 (padrão para KML/XML)
+            k.from_string(file_bytes.decode('utf-8')) 
             
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo KML/KMZ. Certifique-se de que ele não está corrompido ou compactado de forma incomum. Erro: {e}")
+        st.error(f"Erro ao processar o arquivo. Certifique-se de que ele está no formato KML (mesmo que com extensão .xml ou .kml). Erro: {e}")
         return pd.DataFrame()
     
     data = []
@@ -257,7 +257,7 @@ def parse_kml_data(uploaded_file):
 
 
     if not data:
-        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML/KMZ.")
+        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML/KMZ/XML.")
         return pd.DataFrame()
         
     df_kml = pd.DataFrame(data)
@@ -272,16 +272,16 @@ def parse_kml_data(uploaded_file):
 
 
 def import_kml_to_db(conn, df_kml_import):
-    """Insere os dados do KML/KMZ no banco de dados de cache."""
+    """Insere os dados do KML/KMZ/XML no banco de dados de cache."""
     
     if df_kml_import.empty:
-        st.error("Nenhum dado válido de KML/KMZ para importar.")
+        st.error("Nenhum dado válido para importar.")
         return 0
         
     insert_count = 0
     
     try:
-        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML/KMZ..."):
+        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML/KMZ/XML..."):
             for index, row in df_kml_import.iterrows():
                 endereco = row['Endereco_KML']
                 lat = row['Latitude_KML']
@@ -299,12 +299,12 @@ def import_kml_to_db(conn, df_kml_import):
             conn.commit()
             load_geoloc_cache.clear() 
             count_after = len(load_geoloc_cache(conn)) 
-            st.success(f"✅ Importação de KML/KMZ concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
+            st.success(f"✅ Importação de KML/KMZ/XML concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
             st.rerun() 
             return count_after
             
     except Exception as e:
-        st.error(f"Erro crítico ao inserir dados do KML/KMZ no cache. Erro: {e}")
+        st.error(f"Erro crítico ao inserir dados do KML/KMZ/XML no cache. Erro: {e}")
         return 0
 
 
@@ -590,13 +590,12 @@ tab1, tab_split, tab2, tab3, tab_kml = st.tabs([
     "✂️ Split Route (Dividir)", 
     "📋 Pós-Roteirização (Impressão/Cópia)", 
     "💾 Gerenciar Cache de Geolocalização", 
-    "🌍 Importar KML/KMZ (Google Maps)" # NOME DA ABA ATUALIZADO
+    "🌍 Importar KML/KMZ/XML (Google Maps)" 
 ])
 
 
 # ----------------------------------------------------------------------------------
 # VARIÁVEIS DE ESTADO (SESSION STATE)
-# (INALTERADAS)
 # ----------------------------------------------------------------------------------
 
 if 'df_original' not in st.session_state:
@@ -609,13 +608,12 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 
 # ----------------------------------------------------------------------------------
 # ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
-# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match, incluindo KML/KMZ)** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match, incluindo KML/KMZ/XML)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -797,7 +795,6 @@ with tab1:
 
 # ----------------------------------------------------------------------------------
 # ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
-# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab_split:
@@ -863,7 +860,6 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
-# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -1003,7 +999,7 @@ with tab2:
                 df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
                 
                 if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
-                    df_nao_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Nao Volumosos')
+                    df_nao_volumosos_impressao[['Lista de Impressão']].toel(writer, index=False, sheet_name='Lista Nao Volumosos')
                     
                 if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
                     df_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')
@@ -1022,7 +1018,6 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
-# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1232,20 +1227,20 @@ with tab3:
         st.info("O cache já está vazio. Não há dados para excluir.")
 
 # ----------------------------------------------------------------------------------
-# NOVA ABA: IMPORTAR KML/KMZ (COM A MODIFICAÇÃO)
+# NOVA ABA: IMPORTAR KML/KMZ/XML
 # ----------------------------------------------------------------------------------
 
 with tab_kml:
-    st.header("🌍 Importar Pontos de Correção do Google Maps (KML/KMZ)")
-    st.info("Esta função lê 'Placemarks' (marcadores) de um arquivo **KML** ou **KMZ** (compactado) e os salva no cache.")
+    st.header("🌍 Importar Pontos de Correção do Google Maps (KML/KMZ/XML)")
+    st.info("Esta função lê 'Placemarks' (marcadores) de um arquivo **KML**, **KMZ** (compactado) ou **XML** (no formato KML) e os salva no cache.")
     
     st.markdown("---")
-    st.subheader("1. Carregar Arquivo KML ou KMZ")
+    st.subheader("1. Carregar Arquivo KML, KMZ ou XML")
 
-    # MODIFICAÇÃO AQUI: Adicionado 'kmz' à lista de tipos permitidos
+    # Suporte total às três extensões
     uploaded_kml_kmz = st.file_uploader(
-        "Arraste e solte o arquivo KML (.kml) ou KMZ (.kmz) do Google Maps/Earth aqui:", 
-        type=['kml', 'kmz'], # Tipo KMZ adicionado
+        "Arraste e solte o arquivo KML (.kml), KMZ (.kmz) ou XML (.xml) do Google Maps/Earth aqui:", 
+        type=['kml', 'kmz', 'xml'], 
         key="file_kml_kmz"
     )
     
@@ -1253,25 +1248,24 @@ with tab_kml:
         
         st.success(f"Arquivo '{uploaded_kml_kmz.name}' carregado! Clique em 'Processar' para extrair os dados.")
         
-        if st.button("➡️ Processar KML/KMZ e Extrair Dados", key="btn_parse_kml_kmz"):
+        if st.button("➡️ Processar KML/KMZ/XML e Extrair Dados", key="btn_parse_kml_kmz"):
             
             df_kml = parse_kml_data(uploaded_kml_kmz)
             
             if not df_kml.empty:
                 st.markdown("---")
-                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no KML/KMZ")
+                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no Arquivo")
                 st.caption("Verifique se o nome do endereço (**Endereco_KML**) e as coordenadas estão corretos. O nome do endereço será a chave de correção.")
                 
                 st.dataframe(df_kml, use_container_width=True)
                 
                 st.markdown("---")
-                st.warning("⚠️ **ATENÇÃO:** O endereço do KML/KMZ será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** usado no seu pré-roteirização.")
+                st.warning("⚠️ **ATENÇÃO:** O endereço extraído será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** usado no seu pré-roteirização.")
                 
                 if st.button(f"💾 Salvar {len(df_kml)} Pontos no Cache de Geolocalização", key="btn_save_kml_kmz_to_cache"):
-                    # Aqui, a função import_kml_to_db é chamada, usando a origem 'KML_Import'
                     import_kml_to_db(conn, df_kml)
                     
             else:
-                st.error("O arquivo KML/KMZ foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato correto.")
+                st.error("O arquivo foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato KML.")
 
 # ----------------------------------------------------------------------------------

@@ -1400,13 +1400,14 @@ with tab_geodata_import:
         st.subheader("1. Conversão de CSV do Google Maps para o Cache")
         st.warning(f"⚠️ **Importante:** O arquivo CSV deve ser a exportação da sua planilha com as colunas **'{GMAPS_COL_ADDRESS}'**, **'{GMAPS_COL_BAIRRO}'**, **'{GMAPS_COL_CITY}'**, **'{GMAPS_COL_LAT}'** e **'{GMAPS_COL_LON}'**.")
 
-        # --- CORREÇÃO AQUI: ADICIONANDO TIPOS MIME MAIS FLEXÍVEIS ---
+        # --- ALTERAÇÃO AQUI: REMOVENDO RESTRIÇÕES DE TIPO ---
         uploaded_csv_gmaps = st.file_uploader(
             "Arraste e solte o arquivo CSV do Google Maps aqui:", 
-            type=['csv', 'txt', 'text/plain', 'text/csv', 'application/octet-stream'], # Adicionado maior flexibilidade
+            # REMOVIDO o parâmetro 'type' para aceitar qualquer arquivo, forçando o Streamlit
+            # a não bloquear o upload devido a problemas de reconhecimento de MIME type.
             key="file_csv_gmaps"
         )
-        # -------------------------------------------------------------
+        # ----------------------------------------------------
         
         if uploaded_csv_gmaps is not None:
             st.success(f"Arquivo '{uploaded_csv_gmaps.name}' carregado!")

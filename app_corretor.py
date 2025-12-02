@@ -7,7 +7,7 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-from fastkml import kml # NOVO IMPORT: Biblioteca para ler arquivos KML
+from fastkml import kml # Biblioteca para ler arquivos KML
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -64,13 +64,13 @@ EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 # --- Configurações de Banco de Dados ---
 DB_NAME = "geoloc_cache.sqlite"
 TABLE_NAME = "correcoes_geoloc_v3" 
-# COLUNA 'Origem_Correcao' ADICIONADA AQUI
 CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Origem_Correcao']
 PRIMARY_KEYS = ['Endereco_Completo_Cache'] 
 
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
+# (INALTERADAS)
 # ===============================================
 
 @st.cache_resource
@@ -85,7 +85,7 @@ def create_table_if_not_exists(conn):
         Endereco_Completo_Cache TEXT PRIMARY KEY,
         Latitude_Corrigida REAL,
         Longitude_Corrigida REAL,
-        Origem_Correcao TEXT DEFAULT 'Manual' -- NOVA COLUNA
+        Origem_Correcao TEXT DEFAULT 'Manual'
     );
     """
     try:
@@ -97,20 +97,17 @@ def create_table_if_not_exists(conn):
 @st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
 def load_geoloc_cache(conn):
     try:
-        # Garante que Origem_Correcao exista na leitura, mesmo que a tabela seja antiga
         df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
         
         if 'Origem_Correcao' not in df_cache.columns:
-            # Tenta adicionar a coluna se não existir (para compatibilidade)
             conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN Origem_Correcao TEXT DEFAULT 'Manual'")
             conn.commit()
-            df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn) # Recarrega
+            df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn) 
             
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
     except pd.io.sql.DatabaseError:
-        # Se a tabela não existir, retorna um DataFrame com as colunas esperadas
         return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
         st.error(f"Erro ao carregar cache de geolocalização: {e}")
@@ -118,7 +115,6 @@ def load_geoloc_cache(conn):
 
 
 def save_single_entry_to_db(conn, endereco, lat, lon, origem='Manual'):
-    # Origem_Correcao também foi adicionada aqui
     upsert_query = f"""
     INSERT OR REPLACE INTO {TABLE_NAME} 
     (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
@@ -143,7 +139,6 @@ def import_cache_to_db(conn, uploaded_file):
         st.error(f"Erro ao ler o arquivo: {e}")
         return 0
 
-    # Adiciona Origem_Correcao como coluna opcional na importação
     required_cols = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
     if not all(col in df_import.columns for col in required_cols):
         st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols)}")
@@ -173,7 +168,6 @@ def import_cache_to_db(conn, uploaded_file):
                 lon = row['Longitude_Corrigida']
                 origem = row['Origem_Correcao']
                 
-                # Query atualizada para incluir Origem_Correcao
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
                 (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
@@ -205,41 +199,46 @@ def clear_geoloc_cache_db(conn):
 
 
 # ===============================================
-# NOVAS FUNÇÕES DE KML
+# FUNÇÕES DE KML/KMZ (MODIFICADA)
 # ===============================================
 
 @st.cache_data
-def parse_kml_data(uploaded_kml):
-    """Lê um arquivo KML e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
+def parse_kml_data(uploaded_file):
+    """Lê um arquivo KML ou KMZ e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
     
-    # Lendo o conteúdo do arquivo
-    kml_bytes = uploaded_kml.getvalue()
-    
-    # Criando o objeto KML
+    file_bytes = uploaded_file.getvalue()
     k = kml.KML()
+    
     try:
-        k.from_string(kml_bytes)
+        # Tenta carregar o arquivo. O fastkml faz o parse KML e KMZ (ZIP) automaticamente
+        # se o KMZ for um único KML compactado.
+        if uploaded_file.name.lower().endswith('.kmz'):
+            k.from_bytes(file_bytes)
+        else:
+            k.from_string(file_bytes.decode('utf-8'))
+            
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo KML: {e}")
+        st.error(f"Erro ao processar o arquivo KML/KMZ. Certifique-se de que ele não está corrompido ou compactado de forma incomum. Erro: {e}")
         return pd.DataFrame()
     
     data = []
     
     # Percorrendo a estrutura KML
     for feature in k.features():
+        # Percorre as features principais (Document, Folder, Placemark)
         if isinstance(feature, kml.Document):
             for doc_feature in feature.features():
-                # Pode ser Folder ou Placemark diretamente
+                # Se for um Folder
                 if isinstance(doc_feature, kml.Folder):
                     for folder_feature in doc_feature.features():
                         if isinstance(folder_feature, kml.Placemark) and folder_feature.geometry:
-                             # Extrai coordenadas: (lon, lat, alt)
                              coords = list(folder_feature.geometry.coords)[0]
                              data.append({
                                  'Endereco_KML': folder_feature.name,
                                  'Longitude_KML': coords[0],
                                  'Latitude_KML': coords[1]
                              })
+                # Se for um Placemark direto no Document
                 elif isinstance(doc_feature, kml.Placemark) and doc_feature.geometry:
                     coords = list(doc_feature.geometry.coords)[0]
                     data.append({
@@ -247,10 +246,18 @@ def parse_kml_data(uploaded_kml):
                         'Longitude_KML': coords[0],
                         'Latitude_KML': coords[1]
                     })
+        # Se for um Placemark no nível superior
+        elif isinstance(feature, kml.Placemark) and feature.geometry:
+             coords = list(feature.geometry.coords)[0]
+             data.append({
+                 'Endereco_KML': feature.name,
+                 'Longitude_KML': coords[0],
+                 'Latitude_KML': coords[1]
+             })
 
 
     if not data:
-        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML.")
+        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML/KMZ.")
         return pd.DataFrame()
         
     df_kml = pd.DataFrame(data)
@@ -265,22 +272,22 @@ def parse_kml_data(uploaded_kml):
 
 
 def import_kml_to_db(conn, df_kml_import):
-    """Insere os dados do KML no banco de dados de cache."""
+    """Insere os dados do KML/KMZ no banco de dados de cache."""
     
     if df_kml_import.empty:
-        st.error("Nenhum dado válido de KML para importar.")
+        st.error("Nenhum dado válido de KML/KMZ para importar.")
         return 0
         
     insert_count = 0
     
     try:
-        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML..."):
+        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML/KMZ..."):
             for index, row in df_kml_import.iterrows():
                 endereco = row['Endereco_KML']
                 lat = row['Latitude_KML']
                 lon = row['Longitude_KML']
                 
-                # Query atualizada para incluir Origem_Correcao como 'KML_Import'
+                # Origem_Correcao: 'KML_Import'
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
                 (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
@@ -292,18 +299,18 @@ def import_kml_to_db(conn, df_kml_import):
             conn.commit()
             load_geoloc_cache.clear() 
             count_after = len(load_geoloc_cache(conn)) 
-            st.success(f"✅ Importação de KML concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
+            st.success(f"✅ Importação de KML/KMZ concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
             st.rerun() 
             return count_after
             
     except Exception as e:
-        st.error(f"Erro crítico ao inserir dados do KML no cache. Erro: {e}")
+        st.error(f"Erro crítico ao inserir dados do KML/KMZ no cache. Erro: {e}")
         return 0
 
 
 # ===============================================
-# FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
-# (Inalteradas, exceto pelo uso do cache)
+# FUNÇÕES DE PRÉ/PÓS-ROTEIRIZAÇÃO
+# (INALTERADAS)
 # ===============================================
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -460,19 +467,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     return df_circuit, corrected_addresses 
 
 
-# ===============================================
-# FUNÇÃO DE SPLIT DE ROTAS
-# ===============================================
-
 def split_dataframe_for_drivers(df_circuit, num_motoristas):
-    """
-    Divide o DataFrame (o agrupado da Pré-Roteirização) em N DataFrames,
-    distribuindo as paradas de forma mais equitativa possível, MANTENDO A ORDEM.
-    """
     if df_circuit is None or df_circuit.empty:
         return {}
     
-    # Garante que as colunas essenciais para importação do Circuit estejam presentes
     COLUNAS_EXPORT_SPLIT = ['Address', 'Latitude', 'Longitude', 'Notes']
     df_export = df_circuit[['Sequence_Base'] + COLUNAS_EXPORT_SPLIT].copy()
     
@@ -489,33 +487,24 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
     start_index = 0
     
     for i in range(num_motoristas):
-        # O primeiro 'restante' de motoristas recebe uma parada a mais
         paradas_motorista = paradas_base + (1 if i < restante else 0)
         
         end_index = start_index + paradas_motorista
         
         df_motorista = df_export.iloc[start_index:end_index].copy()
         
-        # Insere 'Order ID' antes de 'Address' para o formato Circuit/Spoke
         df_motorista.insert(1, 'Order ID', df_motorista['Notes'].apply(lambda x: str(x).split(';')[0].strip()))
         
-        # Remove a coluna 'Sequence_Base' antes de exportar
         df_motorista = df_motorista.drop(columns=['Sequence_Base'])
         
-        # Colunas finais para exportação
         df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']]
         
-        # Nome da Rota (com contagem de paradas)
         rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
         
         start_index = end_index
         
     return rotas_divididas
 
-
-# ===============================================
-# FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
-# ===============================================
 
 def is_not_purely_volumous(ids_string):
     if pd.isna(ids_string) or not ids_string:
@@ -539,35 +528,23 @@ def is_not_purely_volumous(ids_string):
 
 def processar_rota_para_impressao(df_input):
     
-    # Tenta normalizar as colunas (se estiverem em maiúsculas/minúsculas diferentes)
     df_input.columns = df_input.columns.str.strip().str.lower()
     
-    if COLUNA_NOTES_CIRCUIT not in df_input.columns or COLUNA_ADDRESS_CIRCUIT not in df_input.columns:
-        # A coluna 'order id' também pode ser usada se 'notes' não estiver presente
-        if 'order id' not in df_input.columns:
-            raise KeyError(f"As colunas de endereço ('{COLUNA_ADDRESS_CIRCUIT}') e notas/id ('{COLUNA_NOTES_CIRCUIT}' ou 'order id') não foram encontradas.") 
+    if COLUNA_NOTES_CIRCUIT not in df_input.columns and 'order id' not in df_input.columns:
+        raise KeyError(f"As colunas de endereço ('{COLUNA_ADDRESS_CIRCUIT}') e notas/id ('{COLUNA_NOTES_CIRCUIT}' ou 'order id') não foram encontradas.") 
         
     df = df_input.copy()
     
-    # Se 'notes' estiver faltando, mas 'order id' existir (caso de importação/exportação padrão)
     if COLUNA_NOTES_CIRCUIT not in df.columns and 'order id' in df.columns:
         df[COLUNA_NOTES_CIRCUIT] = df['order id'].astype(str)
         
-    df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].astype(str)
+    df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].astype(str).str.strip('"')
     df = df.dropna(subset=[COLUNA_NOTES_CIRCUIT]) 
     
-    df[COLUNA_NOTES_CIRCUIT] = df[COLUNA_NOTES_CIRCUIT].str.strip('"')
-    
-    # 1. Separa o campo 'Notes' pelo PONTO E VÍRGULA
-    # Ex: '1,2,3*; Pacotes: 3 | Cidade: Curitiba | CEP: 80000000'
     df_split = df[COLUNA_NOTES_CIRCUIT].str.split(';', n=1, expand=True)
     df['Ordem ID'] = df_split[0].str.strip() 
-    
-    # O segundo item é o restante da anotação
     df['Anotações Completas'] = df_split[1].str.strip() if 1 in df_split.columns else ""
     
-    # 2. TRATAMENTO CRÍTICO (ISOLAMENTO DO ID PELO HÍFEN) - NÃO É MAIS NECESSÁRIO AQUI, 
-    # POIS O ID JÁ ESTÁ LIMPO NO CAMPO 'Ordem ID'
     df['ID_Pacote_Limpo'] = df['Ordem ID'].str.strip() 
     
     df['Lista de Impressão'] = (
@@ -576,28 +553,23 @@ def processar_rota_para_impressao(df_input):
         df['Anotações Completas'].astype(str)
     )
     
-    # Adiciona a coluna de endereço para visualização na lista de impressão
     df['Address_Clean'] = df[COLUNA_ADDRESS_CIRCUIT].astype(str)
     
     coluna_filtro = 'ID_Pacote_Limpo' 
     
-    # DataFrame FINAL GERAL
     df_final_geral = df[['Lista de Impressão', 'Address_Clean']].copy() 
     
-    # FILTRAR VOLUMOSOS 
     df_volumosos = df[df[coluna_filtro].str.contains(r'\*', regex=True, na=False)].copy()
     df_volumosos_impressao = df_volumosos[['Lista de Impressão', 'Address_Clean']].copy() 
     
-    # FILTRAR NÃO-VOLUMOSOS
     df_nao_volumosos = df[
         df[coluna_filtro].apply(is_not_purely_volumous)
     ].copy() 
     
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'Address_Clean']].copy()
     
-    # Retorna o DF original *limpo* (com colunas normalizadas) para o Split, se necessário
     df_limpo_para_split_pos = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
-    df_limpo_para_split_pos.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
+    df_limpo_para_split_pos.columns = ['Address', 'Notes'] 
     
     return df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, df_limpo_para_split_pos
 
@@ -612,37 +584,38 @@ create_table_if_not_exists(conn)
 
 st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
-# CRIAÇÃO DAS ABAS - A NOVA ABA KML FOI ADICIONADA AQUI
+# CRIAÇÃO DAS ABAS
 tab1, tab_split, tab2, tab3, tab_kml = st.tabs([
     "🚀 Pré-Roteirização (Importação)", 
     "✂️ Split Route (Dividir)", 
     "📋 Pós-Roteirização (Impressão/Cópia)", 
     "💾 Gerenciar Cache de Geolocalização", 
-    "🌍 Importar KML (Google Maps)" # NOVA ABA
+    "🌍 Importar KML/KMZ (Google Maps)" # NOME DA ABA ATUALIZADO
 ])
 
 
 # ----------------------------------------------------------------------------------
 # VARIÁVEIS DE ESTADO (SESSION STATE)
+# (INALTERADAS)
 # ----------------------------------------------------------------------------------
 
 if 'df_original' not in st.session_state:
     st.session_state['df_original'] = None
 if 'volumoso_ids' not in st.session_state:
     st.session_state['volumoso_ids'] = set() 
-# Este é o DF agrupado e com coordenadas, pronto para o Circuit.
 if 'df_circuit_agrupado_pre' not in st.session_state: 
     st.session_state['df_circuit_agrupado_pre'] = None
 
 
 # ----------------------------------------------------------------------------------
 # ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
+# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match, incluindo KML)** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match, incluindo KML/KMZ)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -665,7 +638,6 @@ with tab1:
                  if col not in df_input_pre.columns:
                      raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
             
-            # Limpa o estado se for um novo arquivo
             if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
                  st.session_state['volumoso_ids'] = set()
                  st.session_state['last_uploaded_name'] = uploaded_file_pre.name
@@ -798,11 +770,10 @@ with tab1:
                 ].copy()
                 
                 st.subheader("Arquivo para Roteirização (Circuit)")
-                st.dataframe(df_circuit.drop(columns=['Sequence_Base']), use_container_width=True) # Remove Sequence_Base para visualização
+                st.dataframe(df_circuit.drop(columns=['Sequence_Base']), use_container_width=True) 
                 
                 buffer_circuit = io.BytesIO()
                 with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
-                    # Remove Sequence_Base para a importação final, pois o Circuit não precisa dela
                     df_circuit.drop(columns=['Sequence_Base']).to_excel(writer, index=False, sheet_name='Circuit_Import_Geral')
                     if not df_volumosos_separado.empty:
                         df_volumosos_separado.drop(columns=['Sequence_Base']).to_excel(writer, index=False, sheet_name='APENAS_VOLUMOSOS')
@@ -826,6 +797,7 @@ with tab1:
 
 # ----------------------------------------------------------------------------------
 # ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
+# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab_split:
@@ -859,27 +831,21 @@ with tab_split:
             st.header("✅ Lista e Downloads Individuais")
             st.success("O arquivo agrupado foi dividido. Visualize a lista de paradas e baixe o arquivo exclusivo de cada motorista.")
             
-            # --- Container para visualização e downloads ---
-            
             for i, (nome_rota, df_rota) in enumerate(rotas_divididas.items()):
                 
                 st.markdown("___")
                 st.subheader(f"Lista para {nome_rota}")
                 
-                # Exibe a lista (DataFrame)
                 st.dataframe(df_rota, use_container_width=True)
                 
-                # Prepara o arquivo Excel individual
                 buffer_individual = io.BytesIO()
                 with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
-                    # df_rota já está no formato correto: 'Order ID', 'Address', 'Latitude', 'Longitude', 'Notes'
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
                 
                 file_name = f"Circuit_Rota_{i+1}_{len(df_rota)}_Paradas.xlsx"
                 
-                # Exibe o botão de download
                 st.download_button(
                     label=f"⬇️ Baixar Arquivo de Importação para {nome_rota}",
                     data=buffer_individual,
@@ -897,6 +863,7 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
+# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -937,7 +904,6 @@ with tab2:
             else:
                 df_input_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_name)
             
-            # CHAMA A FUNÇÃO DE PROCESSAMENTO (AGORA RETORNA 4 OBJETOS)
             results = processar_rota_para_impressao(df_input_pos)
             
             df_final_geral, df_volumosos_impressao, df_nao_volumosos_impressao, _ = results
@@ -1056,6 +1022,7 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
+# (INALTERADA)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -1078,7 +1045,6 @@ def apply_google_coords():
     coord_string_clean = coord_string.strip()
     
     try:
-        # Tenta encontrar formato Lat, Lon (com ponto ou vírgula)
         matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
         
         if len(matches) >= 2:
@@ -1091,7 +1057,7 @@ def apply_google_coords():
             return
             
     except ValueError:
-        pass # Ignora erro de conversão e tenta o próximo formato
+        pass 
                 
     st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
 
@@ -1182,7 +1148,6 @@ with tab3:
                 else:
                     try:
                         endereco_limpo = new_endereco.strip().rstrip(';')
-                        # Passa a origem como 'Manual'
                         save_single_entry_to_db(conn, endereco_limpo, lat_to_save, lon_to_save, origem='Manual')
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
@@ -1215,7 +1180,6 @@ with tab3:
         def export_cache(df_cache):
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                # Adiciona 'Origem_Correcao' ao export
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)
             return buffer
@@ -1268,45 +1232,46 @@ with tab3:
         st.info("O cache já está vazio. Não há dados para excluir.")
 
 # ----------------------------------------------------------------------------------
-# NOVA ABA: IMPORTAR KML
+# NOVA ABA: IMPORTAR KML/KMZ (COM A MODIFICAÇÃO)
 # ----------------------------------------------------------------------------------
 
 with tab_kml:
-    st.header("🌍 Importar Pontos de Correção do Google Maps (KML)")
-    st.info("Esta função lê 'Placemarks' (marcadores) de um arquivo KML e os salva no cache de geolocalização. O **Nome do Placemark** será a chave do endereço de correção.")
+    st.header("🌍 Importar Pontos de Correção do Google Maps (KML/KMZ)")
+    st.info("Esta função lê 'Placemarks' (marcadores) de um arquivo **KML** ou **KMZ** (compactado) e os salva no cache.")
     
     st.markdown("---")
-    st.subheader("1. Carregar Arquivo KML")
+    st.subheader("1. Carregar Arquivo KML ou KMZ")
 
-    uploaded_kml = st.file_uploader(
-        "Arraste e solte o arquivo KML (.kml) do Google Maps/Earth aqui:", 
-        type=['kml'],
-        key="file_kml"
+    # MODIFICAÇÃO AQUI: Adicionado 'kmz' à lista de tipos permitidos
+    uploaded_kml_kmz = st.file_uploader(
+        "Arraste e solte o arquivo KML (.kml) ou KMZ (.kmz) do Google Maps/Earth aqui:", 
+        type=['kml', 'kmz'], # Tipo KMZ adicionado
+        key="file_kml_kmz"
     )
     
-    if uploaded_kml is not None:
+    if uploaded_kml_kmz is not None:
         
-        st.success(f"Arquivo '{uploaded_kml.name}' carregado! Clique em 'Processar KML' para extrair os dados.")
+        st.success(f"Arquivo '{uploaded_kml_kmz.name}' carregado! Clique em 'Processar' para extrair os dados.")
         
-        if st.button("➡️ Processar KML e Extrair Dados", key="btn_parse_kml"):
+        if st.button("➡️ Processar KML/KMZ e Extrair Dados", key="btn_parse_kml_kmz"):
             
-            df_kml = parse_kml_data(uploaded_kml)
+            df_kml = parse_kml_data(uploaded_kml_kmz)
             
             if not df_kml.empty:
                 st.markdown("---")
-                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no KML")
-                st.caption("Verifique se o nome do endereço (**Endereco_KML**) e as coordenadas estão corretos. O nome do endereço deve ser a chave de correção.")
+                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no KML/KMZ")
+                st.caption("Verifique se o nome do endereço (**Endereco_KML**) e as coordenadas estão corretos. O nome do endereço será a chave de correção.")
                 
-                # Exibe o DataFrame para conferência
                 st.dataframe(df_kml, use_container_width=True)
                 
                 st.markdown("---")
-                st.warning("⚠️ **ATENÇÃO:** O endereço do KML será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** que você usa no cache.")
+                st.warning("⚠️ **ATENÇÃO:** O endereço do KML/KMZ será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** usado no seu pré-roteirização.")
                 
-                if st.button(f"💾 Salvar {len(df_kml)} Pontos no Cache de Geolocalização", key="btn_save_kml_to_cache"):
+                if st.button(f"💾 Salvar {len(df_kml)} Pontos no Cache de Geolocalização", key="btn_save_kml_kmz_to_cache"):
+                    # Aqui, a função import_kml_to_db é chamada, usando a origem 'KML_Import'
                     import_kml_to_db(conn, df_kml)
                     
             else:
-                st.error("O arquivo KML foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato correto.")
+                st.error("O arquivo KML/KMZ foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato correto.")
 
 # ----------------------------------------------------------------------------------

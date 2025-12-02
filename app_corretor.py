@@ -147,7 +147,6 @@ def clear_lat_lon_fields():
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (Inalteradas)
 # ===============================================
 
 @st.cache_resource
@@ -306,7 +305,6 @@ def export_cache(df_cache, file_format='xlsx'):
 
 # ===============================================
 # FUNÇÕES DE KML/KMZ/XML
-# (Mantidas com o Plano B)
 # ===============================================
 
 @st.cache_data
@@ -430,150 +428,149 @@ def import_kml_to_db(conn, df_kml_import):
         return 0
 
 # ===============================================
-# NOVA FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (COM LEITURA ROBUSTA E REPARO INTERNO)
+# FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (CORREÇÃO FORÇADA)
 # ===============================================
 
 @st.cache_data
 def convert_google_maps_csv(uploaded_file):
-    """Lê o CSV do Google Maps, concatena o endereço e renomeia Lat/Lon para o formato de cache."""
+    """
+    Tenta ler o CSV original. Se falhar, aplica o reparo interno forçado
+    para corrigir a quebra da coluna 'Destination Address' causada por vírgulas.
+    """
     
-    df = pd.DataFrame()
-    uploaded_file.seek(0) # Reset file pointer for reading
-    
-    # --- TENTATIVAS DE LEITURA ROBUSTA ---
-    
-    # 1. Tentativa: Separador padrão (vírgula) com engine 'python' (mais robusto para quoting)
+    # 1. Leitura do arquivo como texto para reparo
+    uploaded_file.seek(0)
     try:
-        df = pd.read_csv(
-            uploaded_file, 
-            sep=',', 
-            encoding='utf-8', 
-            engine='python',
-            on_bad_lines='warn', # Tenta ignorar linhas malformadas e avisa.
-            skipinitialspace=True
-        )
-        st.info("Leitura CSV bem-sucedida (Engine Python, separador ',').")
-    except Exception as e_python:
-        # 2. Tentativa: Separador ponto e vírgula (padrão brasileiro)
+        # Tenta a leitura padrão (utf-8)
+        content = uploaded_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        # Tenta a leitura latina (latin-1)
+        content = uploaded_file.read().decode('latin-1')
+    except Exception as e:
+        st.error(f"Erro Crítico de Leitura de Arquivo: {e}")
+        return pd.DataFrame()
+        
+    lines = content.strip().splitlines()
+    
+    if not lines:
+        st.error("Arquivo CSV vazio.")
+        return pd.DataFrame()
+
+    # 2. Identificação do cabeçalho e estrutura
+    header = lines[0]
+    data_lines = lines[1:]
+    
+    # Colunas esperadas (11)
+    colunas_finais = [
+        'WKT', 'AT ID', 'Sequence', 'Stop', 'SPX TN', 
+        GMAPS_COL_ADDRESS, GMAPS_COL_BAIRRO, GMAPS_COL_CITY, GMAPS_COL_ZIPCODE, 
+        GMAPS_COL_LAT, GMAPS_COL_LON
+    ]
+
+    reparsed_data = [header] # Começa com o cabeçalho original
+    
+    # Parâmetros fixos baseados na estrutura do seu arquivo (11 colunas)
+    NUM_FIXED_PREFIX = 4 # AT ID, Sequence, Stop, SPX TN (depois do WKT)
+    NUM_FIXED_SUFFIX = 5 # Bairro, City, Zipcode, Lat, Lon (no final)
+
+    for line in data_lines:
+        if not line.strip(): continue
+
+        # Separa o WKT (1ª coluna, sempre entre aspas) do resto
+        # Padrão: ("...") , (resto da linha)
+        match = re.match(r'(".*?")(,(.*))', line)
+        if not match:
+             # Se WKT não estiver entre aspas, a linha está muito malformada
+             reparsed_data.append(line) 
+             continue
+             
+        wkt_col = match.group(1) 
+        rest_of_line = match.group(3) 
+        
+        # Divide o resto da linha por vírgulas, preservando a ordem
+        parts = [p.strip() for p in rest_of_line.split(',')]
+        
+        N_parts = len(parts)
+
+        # Se a linha tiver o número correto de colunas (10 + WKT), usa direto
+        if N_parts == (len(colunas_finais) - 1):
+             reparsed_data.append(line)
+             continue
+        
+        # --- REPARO INTERNO FORÇADO ---
         try:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
-            st.info("Leitura CSV bem-sucedida (Separador ';').")
-        except Exception as e_semicolon:
-            # 3. Tentativa: Separador vírgula (padrão) com engine C (mais rápido, se o problema não for quoting)
-            try:
-                uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8', engine='c')
-                st.info("Leitura CSV bem-sucedida (Engine C, separador ',').")
-            except Exception as e_c:
-                 
-                # 4. Tentativa (Last Resort - Reparo Interno): 
-                # Repara o CSV lendo como texto, identificando a quebra causada pelo endereço sem aspas.
-                try:
-                    uploaded_file.seek(0)
-                    # Read all content as a single string and split by lines
-                    content = uploaded_file.read().decode('utf-8')
-                    lines = content.splitlines()
-                    
-                    if not lines:
-                        raise Exception("Arquivo CSV vazio após a leitura.")
-                        
-                    header = lines[0]
-                    data_lines = lines[1:]
-                    
-                    reparsed_data = []
-                    
-                    for line in data_lines:
-                        # Use regex to separate the first quoted column (WKT) from the rest of the data.
-                        # Pattern: ("...") (comma) (rest of the line)
-                        match = re.match(r'(".*?")(,(.*))', line)
-                        
-                        if match:
-                            wkt_col = match.group(1) # E.g., "POINT (-52.043858 -23.459704)"
-                            rest_of_line = match.group(3) # E.g., AT202511308Y5NT,-,-,BR2541062686820,Geronima Lopes Macetti, 94, Casa,Centro,Paiçandu,87140-000,-23.459704,-52.043858
-                            
-                            # Split the rest of the line by unquoted commas.
-                            parts = [p.strip() for p in rest_of_line.split(',')]
-                            
-                            # We assume the fixed structure of 11 columns in total.
-                            # The fixed columns are:
-                            # 1. Fixed Prefix (4 parts): AT ID, Sequence, Stop, SPX TN (Indexes 0 to 3)
-                            prefix = parts[0:4]
-                            
-                            # 2. Fixed Suffix (5 parts): Bairro, City, Zipcode, Latitude, Longitude (Last 5 elements)
-                            # Index -5 to -1
-                            suffix = parts[-5:] 
-                            
-                            # 3. Destination Address (Problematic Middle): Everything between index 4 and the start of the suffix.
-                            # Start index is 4 (the part after SPX TN).
-                            # End index is -5 (the part before Bairro).
-                            middle_parts_raw = parts[4:-5] 
-                            
-                            if len(prefix) == 4 and len(suffix) == 5 and middle_parts_raw:
-                                # Quote and join the problematic middle parts (Destination Address)
-                                destination_address_quoted = '"' + ','.join(middle_parts_raw).strip() + '"'
-                                
-                                # Reconstruct the line: WKT, prefix, Destination Address (quoted), suffix
-                                new_line = (
-                                    wkt_col + ',' + 
-                                    ','.join(prefix) + ',' + 
-                                    destination_address_quoted + ',' + 
-                                    ','.join(suffix)
-                                )
-                                reparsed_data.append(new_line)
-                            else:
-                                # Fallback: If structure doesn't match the expectation, use the original line
-                                reparsed_data.append(line)
-                        else:
-                             # If WKT is not quoted (unexpected), just use the original line
-                             reparsed_data.append(line)
-
-
-                    # Prepend the header and read the fixed data with Pandas
-                    fixed_data = [header] + reparsed_data
-                    
-                    df = pd.read_csv(io.StringIO('\n'.join(fixed_data)), sep=',')
-                    
-                    # Verify if the number of columns is correct (should be 11)
-                    if len(df.columns) != 11:
-                         raise Exception(f"Reparse falhou. Colunas esperadas: 11, Colunas encontradas: {len(df.columns)}")
-                         
-                    st.info("Leitura CSV bem-sucedida (Last Resort: Reparsing interno para endereços sem aspas).")
+            # Sufixo fixo (Bairro, City, Zipcode, Lat, Lon)
+            # As últimas 5 colunas são o sufixo.
+            suffix = parts[-NUM_FIXED_SUFFIX:] 
+            
+            # Prefixo fixo (AT ID, Sequence, Stop, SPX TN)
+            # As primeiras 4 colunas depois do WKT são o prefixo.
+            prefix = parts[0:NUM_FIXED_PREFIX]
+            
+            # O Miolo é TUDO que está entre o prefixo e o sufixo. 
+            # Isso inclui as partes quebradas do Destination Address.
+            # Começa no índice 4, termina no índice N_parts - 5.
+            middle_parts_raw = parts[NUM_FIXED_PREFIX:N_parts - NUM_FIXED_SUFFIX] 
+            
+            # Checa se as contagens batem e se o miolo existe (deve existir se N_parts > 10)
+            if len(prefix) == NUM_FIXED_PREFIX and len(suffix) == NUM_FIXED_SUFFIX and middle_parts_raw:
                 
-                except Exception as e_last_resort:
-                     # If even the last resort fails, inform the user about the critical error.
-                     st.error(f"❌ Erro Crítico ao ler o arquivo CSV. Falha após 4 tentativas de formatação (',', ';', Python Engine, Reparo Interno).")
-                     st.warning(f"O problema persiste no seu arquivo. Sugestão final: Abra o arquivo no Excel/Google Sheets, insira aspas duplas ('\"') ao redor dos campos de texto (principalmente 'Destination Address') e salve novamente como CSV.")
-                     return pd.DataFrame() # Retorna vazio se todas as tentativas falharem
-                 
-    if df.empty:
-         if len(df) == 0:
+                # 3. Citação e Junção das Partes do Endereço (A RUA COMPLETA!)
+                # Juntamos o miolo com vírgula e colocamos aspas duplas.
+                destination_address_quoted = '"' + ', '.join(middle_parts_raw).strip() + '"'
+                
+                # 4. Reconstrução da Linha (11 colunas no total)
+                new_line = (
+                    wkt_col + ',' + 
+                    ','.join(prefix) + ',' + 
+                    destination_address_quoted + ',' + 
+                    ','.join(suffix)
+                )
+                reparsed_data.append(new_line)
+            else:
+                # Se as contagens fixas não baterem, usa a linha original
+                reparsed_data.append(line)
+
+        except Exception as e:
+            # Falha no reparo (pode ser linha muito malformada), usa a original
+            st.warning(f"Falha de reparo interno em uma linha. Erro: {e}")
+            reparsed_data.append(line)
+
+    # 5. Leitura da linha de dados reparada com Pandas
+    try:
+        df = pd.read_csv(io.StringIO('\n'.join(reparsed_data)), sep=',')
+        
+        # Checagem final de coluna. Se ainda não tiver 11, algo falhou.
+        if len(df.columns) != 11:
+             st.error(f"O reparo resultou em um número incorreto de colunas: {len(df.columns)}. Colunas esperadas: 11.")
              return pd.DataFrame()
-        
-    # --- FIM DAS TENTATIVAS DE LEITURA ---
-        
+             
+    except Exception as e:
+        st.error(f"❌ Erro Crítico: Falha na leitura do CSV após o reparo interno. Erro: {e}")
+        return pd.DataFrame()
+    
+    # ---------------------------------------------------------------------------------------------------------------------
+    # CONCATENAÇÃO FINAL
+    # ---------------------------------------------------------------------------------------------------------------------
+    
     required_cols = [GMAPS_COL_ADDRESS, GMAPS_COL_BAIRRO, GMAPS_COL_CITY, GMAPS_COL_LAT, GMAPS_COL_LON]
     
     if not all(col in df.columns for col in required_cols):
         missing = [col for col in required_cols if col not in df.columns]
         st.error(f"O arquivo CSV do Google Maps está faltando colunas essenciais. Colunas faltando: {', '.join(missing)}")
-        st.info(f"O arquivo deve ter: **'{GMAPS_COL_ADDRESS}'**, **'{GMAPS_COL_BAIRRO}'**, **'{GMAPS_COL_CITY}'**, **'{GMAPS_COL_LAT}'** e **'{GMAPS_COL_LON}'**.")
         return pd.DataFrame()
     
     # 1. Limpeza e Concatenação do Endereço Completo
     
-    # Garantir que CEP exista ou criar coluna vazia
     if GMAPS_COL_ZIPCODE not in df.columns:
          df[GMAPS_COL_ZIPCODE] = ""
          
     df = df.fillna('')
     
-    # ---------------------------------------------------------------------------------------------------------------------
-    # BLOCO DE CONCATENAÇÃO CORRIGIDO: Garante que o Endereço Principal (Rua) seja a base.
-    # ---------------------------------------------------------------------------------------------------------------------
-    
     # Endereço Principal (Rua, Número, Referência) - Deve conter o nome da rua
-    endereco_principal = df[GMAPS_COL_ADDRESS].astype(str).str.strip()
+    # Adicionamos .str.strip('"') para remover as aspas que adicionamos no reparo
+    endereco_principal = df[GMAPS_COL_ADDRESS].astype(str).str.strip().str.strip('"')
     
     # Cria a coluna Endereco_Completo_Cache com o Endereço Principal
     df['Endereco_Completo_Cache'] = endereco_principal
@@ -598,8 +595,8 @@ def convert_google_maps_csv(uploaded_file):
     
     # Limpeza final de vírgulas duplicadas ou vírgulas no início/fim
     df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
-    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r'^\s*,', '', regex=True) # Remove vírgula inicial
-    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True) # Remove vírgula final
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r'^\s*,', '', regex=True) 
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True) 
     df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.strip()
 
     # ---------------------------------------------------------------------------------------------------------------------
@@ -1560,6 +1557,7 @@ with tab_geodata_import:
                 st.subheader(f"✅ {len(df_visualizacao_csv)} Pontos Convertidos (Formato Cache)")
                 st.info("O conteúdo abaixo será salvo como novas entradas no seu cache de geolocalização.")
                 
+                # Exemplo visualizado (com a rua completa!)
                 st.dataframe(df_visualizacao_csv, use_container_width=True)
                 
                 st.markdown("---")

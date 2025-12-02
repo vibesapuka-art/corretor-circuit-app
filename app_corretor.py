@@ -430,19 +430,51 @@ def import_kml_to_db(conn, df_kml_import):
         return 0
 
 # ===============================================
-# NOVA FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS
+# NOVA FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (COM LEITURA ROBUSTA)
 # ===============================================
 
 @st.cache_data
 def convert_google_maps_csv(uploaded_file):
     """Lê o CSV do Google Maps, concatena o endereço e renomeia Lat/Lon para o formato de cache."""
     
+    df = pd.DataFrame()
+    uploaded_file.seek(0) # Reset file pointer for reading
+    
+    # --- TENTATIVAS DE LEITURA ROBUSTA ---
+    
+    # 1. Tentativa: Separador padrão (vírgula) com engine 'python' (mais robusto para quoting)
     try:
-        # Tenta ler o CSV. Streamlit/Pandas geralmente inferem o delimitador corretamente.
-        df = pd.read_csv(uploaded_file)
-    except Exception as e:
-        st.error(f"Erro ao ler o arquivo CSV. Verifique se ele está no formato correto. Erro: {e}")
-        return pd.DataFrame()
+        df = pd.read_csv(
+            uploaded_file, 
+            sep=',', 
+            encoding='utf-8', 
+            engine='python',
+            on_bad_lines='warn', # Tenta ignorar linhas malformadas e avisa.
+            skipinitialspace=True
+        )
+        st.info("Leitura CSV bem-sucedida (Engine Python, separador ',').")
+    except Exception as e_python:
+        # 2. Tentativa: Separador ponto e vírgula (padrão brasileiro)
+        try:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
+            st.info("Leitura CSV bem-sucedida (Separador ';').")
+        except Exception as e_semicolon:
+            # 3. Tentativa: Separador vírgula (padrão) com engine C (mais rápido, se o problema não for quoting)
+            try:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8', engine='c')
+                st.info("Leitura CSV bem-sucedida (Engine C, separador ',').")
+            except Exception as e_c:
+                 st.error(f"❌ Erro Crítico ao ler o arquivo CSV. Falha após 3 tentativas de formatação (',', ';', Python Engine).")
+                 st.warning(f"O problema é que alguns campos de texto (como o endereço) contêm o separador (vírgula) **sem estar entre aspas**. Isso quebra a estrutura de colunas do CSV. Sugestão: Abra o arquivo no Excel/Google Sheets, insira aspas duplas (\"\") ao redor dos campos de texto e salve novamente como CSV.")
+                 return pd.DataFrame() # Retorna vazio se todas as tentativas falharem
+                 
+    if df.empty:
+         st.error("Nenhum dado válido foi lido do arquivo, mesmo após múltiplas tentativas de formatação.")
+         return pd.DataFrame()
+         
+    # --- FIM DAS TENTATIVAS DE LEITURA ---
         
     required_cols = [GMAPS_COL_ADDRESS, GMAPS_COL_BAIRRO, GMAPS_COL_CITY, GMAPS_COL_LAT, GMAPS_COL_LON]
     
@@ -1413,7 +1445,8 @@ with tab_geodata_import:
             st.success(f"Arquivo '{uploaded_csv_gmaps.name}' carregado!")
             
             if st.button("➡️ Converter e Extrair Dados do CSV", key="btn_convert_csv"):
-                with st.spinner("Realizando conversão automática (Concatenação de Endereço e Renomeação)..."):
+                with st.spinner("Realizando conversão automática e leitura robusta..."):
+                     # CHAMA A FUNÇÃO AGORA MAIS ROBUSTA
                      df_convertido = convert_google_maps_csv(uploaded_csv_gmaps)
                      st.session_state['df_csv_convertido'] = df_convertido
                      

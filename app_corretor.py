@@ -7,7 +7,7 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-from fastkml import kml # Biblioteca para ler arquivos KML/KMZ
+from fastkml import kml
 import zipfile 
 
 # --- Configurações Iniciais da Página ---
@@ -808,7 +808,7 @@ with tab1:
 
     uploaded_file_pre = st.file_uploader(
         "Arraste e solte o arquivo original (CSV/Excel) aqui:", 
-        type=['csv', 'xlsx'],
+        type=['csv', 'xlsx'], # Mantido o original, mais conciso.
         key="file_pre"
     )
 
@@ -1244,7 +1244,7 @@ with tab3:
             st.markdown("##") 
             st.button(
                 "Aplicar Coordenadas", 
-                on_click=apply_google_coords, # FUNÇÃO CORRIGIDA AQUI
+                on_click=apply_google_coords, # FUNÇÃO CORRIGIDA
                 key="btn_apply_coord",
             )
         
@@ -1294,7 +1294,7 @@ with tab3:
                         st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
         
         with clear_button_col:
-             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form") # FUNÇÃO CORRIGIDA AQUI
+             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form") # FUNÇÃO CORRIGIDA
 
 
     
@@ -1400,11 +1400,13 @@ with tab_geodata_import:
         st.subheader("1. Conversão de CSV do Google Maps para o Cache")
         st.warning(f"⚠️ **Importante:** O arquivo CSV deve ser a exportação da sua planilha com as colunas **'{GMAPS_COL_ADDRESS}'**, **'{GMAPS_COL_BAIRRO}'**, **'{GMAPS_COL_CITY}'**, **'{GMAPS_COL_LAT}'** e **'{GMAPS_COL_LON}'**.")
 
+        # --- CORREÇÃO AQUI: ADICIONANDO TIPOS MIME MAIS FLEXÍVEIS ---
         uploaded_csv_gmaps = st.file_uploader(
             "Arraste e solte o arquivo CSV do Google Maps aqui:", 
-            type=['csv'], 
+            type=['csv', 'txt', 'text/plain', 'text/csv', 'application/octet-stream'], # Adicionado maior flexibilidade
             key="file_csv_gmaps"
         )
+        # -------------------------------------------------------------
         
         if uploaded_csv_gmaps is not None:
             st.success(f"Arquivo '{uploaded_csv_gmaps.name}' carregado!")

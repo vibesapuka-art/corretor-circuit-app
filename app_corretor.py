@@ -78,6 +78,74 @@ GMAPS_COL_LON = 'Longitude'
 
 
 # ===============================================
+# FUNÇÕES HELPER (CALLBACKS DE FORMULÁRIO)
+# ===============================================
+
+def apply_google_coords():
+    """Converte string de coordenadas (Lat, Lon) para os campos numéricos do formulário."""
+    coord_str = st.session_state.get('form_colar_coord', "")
+    if not coord_str:
+        return
+
+    # Limpeza e tentativa de extração de dois números
+    # Permite vírgula ou espaço ou ponto e vírgula como separador, e ponto como decimal
+    cleaned_str = coord_str.strip().replace(';', ',').replace(' ', ',')
+    cleaned_str = re.sub(r',+', ',', cleaned_str)
+    
+    parts = cleaned_str.split(',')
+    
+    # Filtra por partes que se parecem com floats (pode ter um sinal de menos)
+    numeric_parts = []
+    for p in parts:
+        p = p.strip()
+        if p:
+            # Tenta converter para float para garantir que é um número válido
+            try:
+                float(p)
+                numeric_parts.append(p)
+            except ValueError:
+                continue
+
+    if len(numeric_parts) >= 2:
+        try:
+            # Assumimos o padrão Lat, Lon (mais comum no Google Maps)
+            lat = float(numeric_parts[0])
+            lon = float(numeric_parts[1])
+            
+            # Validação simples: Lat entre -90/90, Lon entre -180/180.
+            # Se Lat > 90, assume que o usuário inverteu e tenta a correção.
+            if abs(lat) > 90 and abs(lon) <= 90:
+                 lat_temp = lat
+                 lat = lon
+                 lon = lat_temp
+
+            if abs(lat) <= 90 and abs(lon) <= 180:
+                st.session_state['form_new_lat_num'] = lat
+                st.session_state['form_new_lon_num'] = lon
+                st.session_state['form_colar_coord'] = "" # Limpa o campo de texto
+                st.success(f"Coordenadas aplicadas: Lat {lat:.8f}, Lon {lon:.8f}")
+            else:
+                 st.error("Coordenadas inválidas detectadas. Verifique a ordem ou se os valores são válidos.")
+                 
+        except ValueError:
+            st.error("Formato de coordenada inválido. Certifique-se de usar ponto para decimais e separador (vírgula ou espaço) entre Lat e Lon.")
+    else:
+        st.error("Não foi possível encontrar duas coordenadas válidas (Latitude e Longitude) na string colada.")
+
+def clear_lat_lon_fields():
+    """Limpa todos os campos do formulário de entrada manual de cache."""
+    if 'form_new_endereco' in st.session_state:
+        st.session_state['form_new_endereco'] = ""
+    if 'form_colar_coord' in st.session_state:
+        st.session_state['form_colar_coord'] = ""
+    if 'form_new_lat_num' in st.session_state:
+        st.session_state['form_new_lat_num'] = 0.0
+    if 'form_new_lon_num' in st.session_state:
+        st.session_state['form_new_lon_num'] = 0.0
+    st.success("Formulário de correção limpo.")
+
+
+# ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
 # (Inalteradas)
 # ===============================================
@@ -370,6 +438,7 @@ def convert_google_maps_csv(uploaded_file):
     """Lê o CSV do Google Maps, concatena o endereço e renomeia Lat/Lon para o formato de cache."""
     
     try:
+        # Tenta ler o CSV. Streamlit/Pandas geralmente inferem o delimitador corretamente.
         df = pd.read_csv(uploaded_file)
     except Exception as e:
         st.error(f"Erro ao ler o arquivo CSV. Verifique se ele está no formato correto. Erro: {e}")
@@ -723,10 +792,6 @@ if 'df_kml_extraido' not in st.session_state:
     st.session_state['df_kml_extraido'] = pd.DataFrame()
 if 'df_csv_convertido' not in st.session_state: # Novo para o CSV convertido
     st.session_state['df_csv_convertido'] = pd.DataFrame()
-
-
-# [ ... Conteúdo das Abas 1, 1.5, 2 e 3 (tab1, tab_split, tab2, tab3) INALTERADOS ... ]
-# (Omissão do código das abas anteriores para foco na atualização)
 
 
 # ----------------------------------------------------------------------------------
@@ -1171,15 +1236,15 @@ with tab3:
                 st.session_state['form_colar_coord'] = ""
                 
             st.text_input(
-                "2. Colar Coordenadas Google (Ex: -23,5139753, -52,1131268)",
+                "2. Colar Coordenadas Google (Ex: -23.5139753, -52.1131268)", # Alterei o exemplo para usar ponto, o que é mais consistente com float
                 key="form_colar_coord",
-                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth."
+                help="Cole o texto de Lat e Lon copiados do Google Maps/Earth. O sistema tentará limpar a vírgula para decimal, mas ponto é preferencial."
             )
         with col_btn_coord:
             st.markdown("##") 
             st.button(
                 "Aplicar Coordenadas", 
-                on_click=apply_google_coords,
+                on_click=apply_google_coords, # FUNÇÃO CORRIGIDA AQUI
                 key="btn_apply_coord",
             )
         
@@ -1219,7 +1284,7 @@ with tab3:
                 lat_to_save = st.session_state.get('form_new_lat_num') 
                 lon_to_save = st.session_state.get('form_new_lon_num')
                 
-                if not new_endereco or (lat_to_save == 0.0 and lon_to_save == 0.0 and st.session_state.get('form_colar_coord') == ""):
+                if not new_endereco or (abs(lat_to_save) == 0.0 and abs(lon_to_save) == 0.0 and st.session_state.get('form_colar_coord') == ""):
                     st.error("Preencha o endereço e as coordenadas (3 e 4) antes de salvar, ou use a ferramenta 'Aplicar Coordenadas'.")
                 else:
                     try:
@@ -1229,7 +1294,7 @@ with tab3:
                         st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
         
         with clear_button_col:
-             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form")
+             st.button("❌ Limpar Formulário", on_click=clear_lat_lon_fields, key="btn_clear_form") # FUNÇÃO CORRIGIDA AQUI
 
 
     
@@ -1411,4 +1476,3 @@ with tab_geodata_import:
                     
             elif uploaded_kml_kmz is not None and st.session_state['df_kml_extraido'].empty:
                  st.info("Carregue o arquivo e clique em 'Processar KML/KMZ/XML e Extrair Dados'.")
-

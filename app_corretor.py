@@ -644,6 +644,35 @@ def get_most_common_or_empty(x):
         return ""
     return x_limpo.mode().iloc[0]
 
+# --- FUNÇÃO DE TRIMAGEM NO CACHE (NOVA IMPLEMENTAÇÃO DE CHAVE) ---
+def trim_cidade_cep(endereco_completo):
+    """
+    Remove os dois últimos campos separados por vírgula da string do endereço do cache, 
+    assumindo que são a Cidade e o CEP. 
+    Mantém Rua, Número, Ponto de Referência e Bairro para o match.
+    """
+    if pd.isna(endereco_completo):
+        return None
+    
+    # Padroniza para maiúsculas e remove espaços em branco extras
+    endereco = str(endereco_completo).strip().upper()
+    
+    # Divide a string pelas vírgulas
+    partes = endereco.split(',')
+    
+    # Se houver pelo menos 3 partes (o que indica que há 2 partes extras - Cidade/CEP)
+    if len(partes) >= 3:
+        # Retorna todas as partes, exceto as duas últimas ([:-2])
+        chave_trimada = ','.join(partes[:-2]).strip()
+        
+        # Limpa espaços em branco em excesso após a vírgula
+        chave_trimada = chave_trimada.replace(', ', ',').replace(' ,', ',')
+        return chave_trimada
+        
+    # Se não for possível identificar 2 partes para remover, retorna o endereço original limpo
+    return endereco.replace(', ', ',').replace(' ,', ',')
+
+
 @st.cache_data
 def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc):
     colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
@@ -658,6 +687,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
     df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
     
+    # CHAVE DE BUSCA NO MAPA (Destination Address + Bairro)
+    # Esta é a chave mais robusta para buscar no cache trimado
     df['Chave_Busca_Cache'] = (
         df[COLUNA_ENDERECO].astype(str).str.strip() + 
         ', ' + 
@@ -665,7 +696,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     )
     df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*$', '', regex=True)
     df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*,', ',', regex=True)
-
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.upper() # Padroniza para match com o cache trimado
+    
     
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
@@ -681,15 +713,19 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     
     # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
     if not df_cache_geoloc.empty:
+        
+        # Cria a chave de match no cache, removendo Cidade e CEP (TRIM)
+        df_cache_geoloc['Chave_Cache_DB'] = df_cache_geoloc['Endereco_Completo_Cache'].apply(trim_cidade_cep)
+        
         df_cache_lookup = df_cache_geoloc.rename(columns={
-            'Endereco_Completo_Cache': 'Chave_Cache_DB', 
             'Latitude_Corrigida': 'Cache_Lat',
             'Longitude_Corrigida': 'Cache_Lon'
         })
         
+        # Realiza o merge usando a nova chave (Destination Address + Bairro)
         df = pd.merge(
             df, 
-            df_cache_lookup, 
+            df_cache_lookup[['Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon']].drop_duplicates(subset=['Chave_Cache_DB']), 
             left_on='Chave_Busca_Cache', 
             right_on='Chave_Cache_DB',   
             how='left'
@@ -704,10 +740,10 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         
         # 1. IDENTIFY CORRECTED (Para o relatório)
         df_corrected = df[cache_mask].copy()
-        df_corrected_unique = df_corrected.drop_duplicates(subset=['Chave_Cache_DB'])
+        df_corrected_unique = df_corrected.drop_duplicates(subset=['Chave_Busca_Cache']) # Usa a chave de busca do mapa
         
         # Colunas para o relatório de corrigidos
-        df_corrected_unique = df_corrected_unique[['Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon', 'Lat_Original_CSV', 'Lon_Original_CSV']]
+        df_corrected_unique = df_corrected_unique[['Chave_Busca_Cache', 'Cache_Lat', 'Cache_Lon', 'Lat_Original_CSV', 'Lon_Original_CSV']]
         df_corrected_unique.columns = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Latitude_Original', 'Longitude_Original']
         
         # 2. IDENTIFY UNCORRECTED (NEW) (Para o relatório)
@@ -1194,7 +1230,6 @@ with tab1:
 
 # ----------------------------------------------------------------------------------
 # ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
-# [Mantido inalterado]
 # ----------------------------------------------------------------------------------
 with tab_split:
     st.header("✂️ Dividir Rota PRÉ-Roteirização (Downloads Individuais)")
@@ -1227,7 +1262,7 @@ with tab_split:
             st.header("✅ Lista e Downloads Individuais")
             st.success("O arquivo agrupado foi dividido. Visualize a lista de paradas e baixe o arquivo exclusivo de cada motorista.")
             
-            for i, (nome_rota, df_rota) in rotas_divididas.items():
+            for i, (nome_rota, df_rota) in enumerate(rotas_divididas.items()): # Adicionado enumerate para i
                 
                 st.markdown("___")
                 st.subheader(f"Lista para {nome_rota}")
@@ -1235,11 +1270,12 @@ with tab_split:
                 st.dataframe(df_rota, use_container_width=True)
                 
                 buffer_individual = io.BytesIO()
-                with pd.ExcelWriter(buffer_individual, engine='openypxl') as writer:
+                with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
                 
+                # Corrigida a lógica de nome de arquivo para usar 'i'
                 file_name = f"Circuit_Rota_{i+1}_{len(df_rota)}_Paradas.xlsx"
                 
                 st.download_button(
@@ -1256,7 +1292,6 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
-# [Mantido inalterado]
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -1415,7 +1450,6 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
-# [Mantido inalterado - Apenas UI/Visualização]
 # ----------------------------------------------------------------------------------
 with tab3:
     st.header("💾 Gerenciamento Direto do Cache de Geolocalização")
@@ -1571,14 +1605,7 @@ with tab3:
         
         if uploaded_backup is not None:
             if st.button("⬆️ Iniciar Restauração de Backup", key="btn_restore_cache"):
-                 # Simplificação da função import_cache_to_db para usar a lógica de upsert
-                 # para manter o código limpo, vamos usar o novo flow de sincronização
-                 # após a conversão, mas a função original de importação/substituição total
-                 # ainda é mais rápida e estável para a restauração.
                  
-                 # Reimplementando a lógica simplificada da função import_cache_to_db aqui,
-                 # pois a remoção da função original causaria erros.
-
                 try:
                     if uploaded_backup.name.endswith('.csv'):
                         df_import = pd.read_csv(uploaded_backup)

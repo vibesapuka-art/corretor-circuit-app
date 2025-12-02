@@ -227,7 +227,7 @@ def export_cache(df_cache, file_format='xlsx'):
 
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - REFORÇO 2)
+# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - FROM_BYTES)
 # ===============================================
 
 @st.cache_data
@@ -238,11 +238,11 @@ def parse_kml_data(uploaded_file):
     k = kml.KML()
     
     try:
-        # Tenta o parsing de KMZ (ZIP) - AGORA USANDO from_kmz()
+        # Tenta o parsing de KMZ (ZIP)
+        # k.from_bytes() é o método moderno para dados binários (KMZ ou KML lido como binário)
         if uploaded_file.name.lower().endswith('.kmz'):
-            # CORREÇÃO PARA O ERRO 'KML' object has no attribute 'from_bytes'
-            # from_kmz() é o método mais compatível para KMZ
-            k.from_kmz(file_bytes) 
+            # CORREÇÃO: Usa o método from_bytes() para KMZ (compatível com versões mais novas)
+            k.from_bytes(file_bytes) 
         else:
             # Tenta o parsing de KML/XML como string UTF-8
             k.from_string(file_bytes.decode('utf-8')) 
@@ -876,7 +876,7 @@ with tab_split:
                 st.dataframe(df_rota, use_container_width=True)
                 
                 buffer_individual = io.BytesIO()
-                with pd.ExcelWriter(buffer_individual, engine='openynxl') as writer:
+                with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)

@@ -196,9 +196,38 @@ def clear_geoloc_cache_db(conn):
     except Exception as e:
         st.error(f"❌ Erro ao limpar o cache: {e}")
 
+def export_cache(df_cache, file_format='xlsx'):
+    """Exporta o DataFrame de cache em XLSX ou CSV, garantindo o separador correto."""
+    
+    df_export = df_cache[CACHE_COLUMNS].copy()
+    
+    # Garantir que Lat/Lon usem ponto para CSV e 8 casas decimais
+    df_export['Latitude_Corrigida'] = pd.to_numeric(df_export['Latitude_Corrigida'], errors='coerce').round(8)
+    df_export['Longitude_Corrigida'] = pd.to_numeric(df_export['Longitude_Corrigida'], errors='coerce').round(8)
+    
+    buffer = io.BytesIO()
+    
+    if file_format == 'xlsx':
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+            df_export.to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "cache_geolocalizacao_backup.xlsx"
+    
+    elif file_format == 'csv':
+        # Cria o CSV no buffer com separador "," (vírgula)
+        df_export.to_csv(buffer, index=False, sep=',', encoding='utf-8')
+        mime = "text/csv"
+        filename = "cache_geolocalizacao_backup.csv"
+        
+    else:
+        raise ValueError("Formato de arquivo não suportado para exportação.")
+        
+    buffer.seek(0)
+    return buffer, mime, filename
+
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA)
+# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - REFORÇO)
 # ===============================================
 
 @st.cache_data
@@ -218,20 +247,22 @@ def parse_kml_data(uploaded_file):
             
     except Exception as e:
         # Erro durante o parsing (arquivo corrompido, formato inválido, etc.)
-        st.error(f"Erro ao tentar processar o arquivo. Verifique se ele é um KML/KMZ válido. Erro: {e}")
+        st.error(f"Erro Crítico ao processar o arquivo. Verifique se ele é um KML/KMZ válido. Erro: {e}")
         return pd.DataFrame()
-    
-    # --- BLOCO DE VERIFICAÇÃO PARA EVITAR 'NoneType' object is not callable ---
-    # Se k não foi configurado corretamente (fastkml falha silenciosa ou parcial), features() pode ser None
-    if k.features is None: 
-         st.error("Erro de Estrutura: O arquivo KML/KMZ foi carregado, mas a biblioteca não conseguiu extrair nenhuma 'feature' (estrutura principal). O arquivo pode não ser um KML válido.")
-         return pd.DataFrame()
-    # ---------------------------------
     
     data = []
     
-    # Percorrendo a estrutura KML (AGORA SEGURO)
-    for feature in k.features():
+    # --- BLOCO DE ITERAÇÃO MAIS SEGURO (CORREÇÃO DO TypeError) ---
+    try:
+        # Tenta obter as features. Converte para lista antes de iterar para maior segurança.
+        features_to_iterate = list(k.features())
+    except Exception as e:
+        # Captura o TypeError original (k.features() is not callable) se o parsing falhou parcialmente.
+        st.error(f"Erro ao tentar acessar os elementos KML. O arquivo está corrompido ou o formato é inválido (Tipo de erro: {type(e).__name__}).")
+        return pd.DataFrame()
+    
+    # Itera sobre os elementos principais
+    for feature in features_to_iterate:
         # Percorre as features principais (Document, Folder, Placemark)
         if isinstance(feature, kml.Document):
             for doc_feature in feature.features():
@@ -315,10 +346,8 @@ def import_kml_to_db(conn, df_kml_import):
         return 0
 
 
-# ===============================================
-# FUNÇÕES DE PRÉ/PÓS-ROTEIRIZAÇÃO
-# (INALTERADAS)
-# ===============================================
+# [ ... Funções de PRÉ/PÓS-ROTEIRIZAÇÃO inalteradas ... ]
+
 def limpar_endereco(endereco):
     if pd.isna(endereco):
         return ""
@@ -611,7 +640,11 @@ if 'volumoso_ids' not in st.session_state:
     st.session_state['volumoso_ids'] = set() 
 if 'df_circuit_agrupado_pre' not in st.session_state: 
     st.session_state['df_circuit_agrupado_pre'] = None
+if 'df_kml_extraido' not in st.session_state:
+    st.session_state['df_kml_extraido'] = pd.DataFrame()
 
+
+# [ ... Conteúdo da Aba 1: PRÉ-ROTEIRIZAÇÃO (Inalterado) ... ]
 
 # ----------------------------------------------------------------------------------
 # ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
@@ -800,6 +833,8 @@ with tab1:
                 st.info("Agora, você pode usar o arquivo na aba **✂️ Split Route** ou este arquivo geral no Circuit.")
 
 
+# [ ... Conteúdo da Aba 1.5: SPLIT ROUTE (Inalterado) ... ]
+
 # ----------------------------------------------------------------------------------
 # ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
 # ----------------------------------------------------------------------------------
@@ -827,7 +862,7 @@ with tab_split:
             key="num_motoristas_split_pre"
         )
         
-        if st.button(f"➡️ Dividir e Gerar Botões de Download Individual", key="btn_split_route_pre"):
+        if st.button("➡️ Dividir e Gerar Botões de Download Individual", key="btn_split_route_pre"):
             
             rotas_divididas = split_dataframe_for_drivers(df_rota_para_split, num_motoristas)
             
@@ -861,9 +896,7 @@ with tab_split:
             st.markdown("---")
             st.info("Cada arquivo baixado contém a lista de paradas na ordem sequencial, com coordenadas, para ser otimizada individualmente no Circuit/Spoke.")
 
-    else:
-        st.warning("⚠️ **Etapa Pendente:** Por favor, vá para a aba **🚀 Pré-Roteirização** e clique em '🚀 Iniciar Corretor e Agrupamento' primeiro. O arquivo agrupado será carregado aqui automaticamente.")
-
+# [ ... Conteúdo da Aba 2: PÓS-ROTEIRIZAÇÃO (Inalterado) ... ]
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
@@ -1023,6 +1056,8 @@ with tab2:
             )
 
 
+# [ ... Conteúdo da Aba 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (Agora com opção CSV de backup) ... ]
+
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
 # ----------------------------------------------------------------------------------
@@ -1169,7 +1204,7 @@ with tab3:
     st.markdown("---")
     
     
-    # --- BACKUP E RESTAURAÇÃO ---
+    # --- BACKUP E RESTAURAÇÃO (AGORA COM OPÇÃO CSV) ---
     st.header("4.3 Backup e Restauração do Cache")
     st.caption("Gerencie o cache de geolocalização para migração ou segurança dos dados.")
     
@@ -1179,22 +1214,29 @@ with tab3:
         st.markdown("#### 📥 Fazer Backup (Download)")
         st.info(f"Baixe o cache atual (**{len(df_cache_original)} entradas**).")
         
-        def export_cache(df_cache):
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
-                df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
-            buffer.seek(0)
-            return buffer
-            
         if not df_cache_original.empty:
-            backup_file = export_cache(df_cache_original)
+            
+            # --- DOWNLOAD XLSX (PADRÃO) ---
+            backup_xlsx, mime_xlsx, filename_xlsx = export_cache(df_cache_original, 'xlsx')
             st.download_button(
                 label="⬇️ Baixar Backup do Cache (.xlsx)",
-                data=backup_file,
-                file_name="cache_geolocalizacao_backup.xlsx",
-                mime=EXCEL_MIME_TYPE, 
-                key="download_backup"
+                data=backup_xlsx,
+                file_name=filename_xlsx,
+                mime=mime_xlsx, 
+                key="download_backup_xlsx"
             )
+            
+            # --- DOWNLOAD CSV (NOVA OPÇÃO) ---
+            backup_csv, mime_csv, filename_csv = export_cache(df_cache_original, 'csv')
+            st.download_button(
+                label="⬇️ Baixar Backup do Cache (.csv, Separador `,`)",
+                data=backup_csv,
+                file_name=filename_csv,
+                mime=mime_csv, 
+                key="download_backup_csv",
+                help="Este arquivo CSV usa vírgula (,) como separador, garantindo que as colunas fiquem separadas corretamente para importação ou visualização em planilhas."
+            )
+            
         else:
             st.warning("O cache está vazio, não há dados para baixar.")
 
@@ -1255,24 +1297,30 @@ with tab_kml:
         
         st.success(f"Arquivo '{uploaded_kml_kmz.name}' carregado! Clique em 'Processar' para extrair os dados.")
         
+        # O botão agora salva o resultado do parsing no session state
         if st.button("➡️ Processar KML/KMZ/XML e Extrair Dados", key="btn_parse_kml_kmz"):
+            with st.spinner("Processando o arquivo geoespacial..."):
+                 df_kml = parse_kml_data(uploaded_kml_kmz)
+                 st.session_state['df_kml_extraido'] = df_kml
+                 
+                 if df_kml.empty:
+                     st.error("Nenhum dado de parada (Placemark) foi extraído. Verifique o arquivo.")
+                     
+        # Visualização dos dados (USANDO O SESSION STATE)
+        if not st.session_state['df_kml_extraido'].empty:
+            df_kml_visualizacao = st.session_state['df_kml_extraido']
             
-            df_kml = parse_kml_data(uploaded_kml_kmz)
+            st.markdown("---")
+            st.subheader(f"✅ {len(df_kml_visualizacao)} Pontos Extraídos (Visualização das Colunas)")
+            st.warning("⚠️ **ATENÇÃO:** O conteúdo da coluna **'Endereco_KML'** será a **chave exata** para a correção no seu cache.")
             
-            if not df_kml.empty:
-                st.markdown("---")
-                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no Arquivo")
-                st.caption("Verifique se o nome do endereço (**Endereco_KML**) e as coordenadas estão corretos. O nome do endereço será a chave de correção.")
-                
-                st.dataframe(df_kml, use_container_width=True)
-                
-                st.markdown("---")
-                st.warning("⚠️ **ATENÇÃO:** O endereço extraído será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** usado no seu pré-roteirização.")
-                
-                if st.button(f"💾 Salvar {len(df_kml)} Pontos no Cache de Geolocalização", key="btn_save_kml_kmz_to_cache"):
-                    import_kml_to_db(conn, df_kml)
+            # Novo Dataframe para visualizar as colunas extraídas
+            st.dataframe(df_kml_visualizacao, use_container_width=True)
+            
+            st.markdown("---")
+            
+            if st.button(f"💾 Salvar {len(df_kml_visualizacao)} Pontos no Cache de Geolocalização", key="btn_save_kml_kmz_to_cache"):
+                import_kml_to_db(conn, df_kml_visualizacao)
                     
-            else:
-                st.error("O arquivo foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato KML.")
-
-# ----------------------------------------------------------------------------------
+        elif uploaded_kml_kmz is not None and st.session_state['df_kml_extraido'].empty:
+             st.info("Carregue o arquivo e clique em 'Processar KML/KMZ/XML e Extrair Dados' para visualizar o resultado.")

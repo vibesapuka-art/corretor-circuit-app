@@ -430,7 +430,7 @@ def import_kml_to_db(conn, df_kml_import):
         return 0
 
 # ===============================================
-# NOVA FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (COM LEITURA ROBUSTA)
+# NOVA FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (COM LEITURA ROBUSTA E CONCATENAÇÃO CORRIGIDA)
 # ===============================================
 
 @st.cache_data
@@ -492,18 +492,41 @@ def convert_google_maps_csv(uploaded_file):
          
     df = df.fillna('')
     
-    # Concatenação: Endereço + Bairro + Cidade + CEP
-    # (Removendo vírgulas duplicadas ou vírgulas no final)
-    df['Endereco_Completo_Cache'] = (
-        df[GMAPS_COL_ADDRESS].astype(str).str.strip() + ', ' +
-        df[GMAPS_COL_BAIRRO].astype(str).str.strip() + ', ' +
-        df[GMAPS_COL_CITY].astype(str).str.strip() + 
-        df[GMAPS_COL_ZIPCODE].apply(lambda x: f", {x.strip()}" if x.strip() else "")
+    # ---------------------------------------------------------------------------------------------------------------------
+    # NOVO BLOCO DE CONCATENAÇÃO CORRIGIDO: Garante que o Endereço Principal (Rua) seja a base.
+    # ---------------------------------------------------------------------------------------------------------------------
+    
+    # Endereço Principal (Rua, Número, Referência) - Deve conter o nome da rua
+    endereco_principal = df[GMAPS_COL_ADDRESS].astype(str).str.strip()
+    
+    # Cria a coluna Endereco_Completo_Cache com o Endereço Principal
+    df['Endereco_Completo_Cache'] = endereco_principal
+    
+    # Adiciona Bairro se não estiver vazio
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_BAIRRO].strip()}" if row[GMAPS_COL_BAIRRO].strip() else row['Endereco_Completo_Cache'],
+        axis=1
     )
     
+    # Adiciona Cidade se não estiver vazia
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_CITY].strip()}" if row[GMAPS_COL_CITY].strip() and row[GMAPS_COL_CITY].strip() not in row[GMAPS_COL_BAIRRO].strip() else row['Endereco_Completo_Cache'],
+        axis=1
+    )
+    
+    # Adiciona CEP se não estiver vazio
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_ZIPCODE].strip()}" if row[GMAPS_COL_ZIPCODE].strip() else row['Endereco_Completo_Cache'],
+        axis=1
+    )
+    
+    # Limpeza final de vírgulas duplicadas ou vírgulas no início/fim
     df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
-    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True)
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r'^\s*,', '', regex=True) # Remove vírgula inicial
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True) # Remove vírgula final
     df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.strip()
+
+    # ---------------------------------------------------------------------------------------------------------------------
 
     # 2. Renomear Lat/Lon
     df = df.rename(columns={
@@ -526,7 +549,7 @@ def convert_google_maps_csv(uploaded_file):
     return df_final.drop_duplicates(subset=['Endereco_Completo_Cache'])
 
 
-# [ ... FUNÇÕES DE PRÉ/PÓS-ROTEIRIZAÇÃO INALTERADAS ... ]
+# [ ... O restante do código (funções de pré-roteirização e interface) permanece inalterado ... ]
 
 def limpar_endereco(endereco):
     if pd.isna(endereco):

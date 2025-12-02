@@ -7,7 +7,7 @@ import streamlit as st
 import sqlite3 
 import math
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
-
+from fastkml import kml # NOVO IMPORT: Biblioteca para ler arquivos KML
 
 # --- Configurações Iniciais da Página ---
 st.set_page_config(
@@ -64,13 +64,13 @@ EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 # --- Configurações de Banco de Dados ---
 DB_NAME = "geoloc_cache.sqlite"
 TABLE_NAME = "correcoes_geoloc_v3" 
-CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
+# COLUNA 'Origem_Correcao' ADICIONADA AQUI
+CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Origem_Correcao']
 PRIMARY_KEYS = ['Endereco_Completo_Cache'] 
 
 
 # ===============================================
 # FUNÇÕES DE BANCO DE Dados (SQLite)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 @st.cache_resource
@@ -84,7 +84,8 @@ def create_table_if_not_exists(conn):
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
         Endereco_Completo_Cache TEXT PRIMARY KEY,
         Latitude_Corrigida REAL,
-        Longitude_Corrigida REAL
+        Longitude_Corrigida REAL,
+        Origem_Correcao TEXT DEFAULT 'Manual' -- NOVA COLUNA
     );
     """
     try:
@@ -96,27 +97,37 @@ def create_table_if_not_exists(conn):
 @st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
 def load_geoloc_cache(conn):
     try:
+        # Garante que Origem_Correcao exista na leitura, mesmo que a tabela seja antiga
         df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
+        
+        if 'Origem_Correcao' not in df_cache.columns:
+            # Tenta adicionar a coluna se não existir (para compatibilidade)
+            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN Origem_Correcao TEXT DEFAULT 'Manual'")
+            conn.commit()
+            df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn) # Recarrega
+            
         df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
         df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
         return df_cache
     except pd.io.sql.DatabaseError:
+        # Se a tabela não existir, retorna um DataFrame com as colunas esperadas
         return pd.DataFrame(columns=CACHE_COLUMNS)
     except Exception as e:
         st.error(f"Erro ao carregar cache de geolocalização: {e}")
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
 
-def save_single_entry_to_db(conn, endereco, lat, lon):
+def save_single_entry_to_db(conn, endereco, lat, lon, origem='Manual'):
+    # Origem_Correcao também foi adicionada aqui
     upsert_query = f"""
     INSERT OR REPLACE INTO {TABLE_NAME} 
-    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-    VALUES (?, ?, ?);
+    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+    VALUES (?, ?, ?, ?);
     """
     try:
-        conn.execute(upsert_query, (endereco, lat, lon))
+        conn.execute(upsert_query, (endereco, lat, lon, origem))
         conn.commit()
-        st.success(f"Correção salva para: **{endereco}**.")
+        st.success(f"Correção salva para: **{endereco}** (Origem: {origem}).")
         load_geoloc_cache.clear() 
         st.rerun() 
     except Exception as e:
@@ -132,12 +143,16 @@ def import_cache_to_db(conn, uploaded_file):
         st.error(f"Erro ao ler o arquivo: {e}")
         return 0
 
+    # Adiciona Origem_Correcao como coluna opcional na importação
     required_cols = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']
     if not all(col in df_import.columns for col in required_cols):
         st.error(f"Erro de Importação: O arquivo deve conter as colunas exatas: {', '.join(required_cols)}")
         return 0
 
-    df_import = df_import[required_cols].copy()
+    if 'Origem_Correcao' not in df_import.columns:
+         df_import['Origem_Correcao'] = 'Import_Backup'
+         
+    df_import = df_import[required_cols + ['Origem_Correcao']].copy()
     df_import['Endereco_Completo_Cache'] = df_import['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
     df_import['Latitude_Corrigida'] = df_import['Latitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
     df_import['Longitude_Corrigida'] = df_import['Longitude_Corrigida'].astype(str).str.replace(',', '.', regex=False)
@@ -156,12 +171,15 @@ def import_cache_to_db(conn, uploaded_file):
                 endereco = row['Endereco_Completo_Cache']
                 lat = row['Latitude_Corrigida']
                 lon = row['Longitude_Corrigida']
+                origem = row['Origem_Correcao']
+                
+                # Query atualizada para incluir Origem_Correcao
                 upsert_query = f"""
                 INSERT OR REPLACE INTO {TABLE_NAME} 
-                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida) 
-                VALUES (?, ?, ?);
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+                VALUES (?, ?, ?, ?);
                 """
-                conn.execute(upsert_query, (endereco, lat, lon))
+                conn.execute(upsert_query, (endereco, lat, lon, origem))
                 insert_count += 1
             
             conn.commit()
@@ -187,8 +205,105 @@ def clear_geoloc_cache_db(conn):
 
 
 # ===============================================
+# NOVAS FUNÇÕES DE KML
+# ===============================================
+
+@st.cache_data
+def parse_kml_data(uploaded_kml):
+    """Lê um arquivo KML e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
+    
+    # Lendo o conteúdo do arquivo
+    kml_bytes = uploaded_kml.getvalue()
+    
+    # Criando o objeto KML
+    k = kml.KML()
+    try:
+        k.from_string(kml_bytes)
+    except Exception as e:
+        st.error(f"Erro ao processar o arquivo KML: {e}")
+        return pd.DataFrame()
+    
+    data = []
+    
+    # Percorrendo a estrutura KML
+    for feature in k.features():
+        if isinstance(feature, kml.Document):
+            for doc_feature in feature.features():
+                # Pode ser Folder ou Placemark diretamente
+                if isinstance(doc_feature, kml.Folder):
+                    for folder_feature in doc_feature.features():
+                        if isinstance(folder_feature, kml.Placemark) and folder_feature.geometry:
+                             # Extrai coordenadas: (lon, lat, alt)
+                             coords = list(folder_feature.geometry.coords)[0]
+                             data.append({
+                                 'Endereco_KML': folder_feature.name,
+                                 'Longitude_KML': coords[0],
+                                 'Latitude_KML': coords[1]
+                             })
+                elif isinstance(doc_feature, kml.Placemark) and doc_feature.geometry:
+                    coords = list(doc_feature.geometry.coords)[0]
+                    data.append({
+                        'Endereco_KML': doc_feature.name,
+                        'Longitude_KML': coords[0],
+                        'Latitude_KML': coords[1]
+                    })
+
+
+    if not data:
+        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML.")
+        return pd.DataFrame()
+        
+    df_kml = pd.DataFrame(data)
+    # Limpeza básica (ex: remover espaços/pontos finais indesejados no nome)
+    df_kml['Endereco_KML'] = df_kml['Endereco_KML'].astype(str).str.strip().str.rstrip(';')
+    
+    # Garante que Lat/Lon sejam floats
+    df_kml['Latitude_KML'] = pd.to_numeric(df_kml['Latitude_KML'], errors='coerce')
+    df_kml['Longitude_KML'] = pd.to_numeric(df_kml['Longitude_KML'], errors='coerce')
+
+    return df_kml.dropna(subset=['Latitude_KML', 'Longitude_KML'])
+
+
+def import_kml_to_db(conn, df_kml_import):
+    """Insere os dados do KML no banco de dados de cache."""
+    
+    if df_kml_import.empty:
+        st.error("Nenhum dado válido de KML para importar.")
+        return 0
+        
+    insert_count = 0
+    
+    try:
+        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML..."):
+            for index, row in df_kml_import.iterrows():
+                endereco = row['Endereco_KML']
+                lat = row['Latitude_KML']
+                lon = row['Longitude_KML']
+                
+                # Query atualizada para incluir Origem_Correcao como 'KML_Import'
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+                VALUES (?, ?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon, 'KML_Import'))
+                insert_count += 1
+            
+            conn.commit()
+            load_geoloc_cache.clear() 
+            count_after = len(load_geoloc_cache(conn)) 
+            st.success(f"✅ Importação de KML concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
+            st.rerun() 
+            return count_after
+            
+    except Exception as e:
+        st.error(f"Erro crítico ao inserir dados do KML no cache. Erro: {e}")
+        return 0
+
+
+# ===============================================
 # FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
+# (Inalteradas, exceto pelo uso do cache)
 # ===============================================
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -400,7 +515,6 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 
 # ===============================================
 # FUNÇÕES DE PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO)
-# (Mantidas do Código Anterior, Omitidas para Brevidade)
 # ===============================================
 
 def is_not_purely_volumous(ids_string):
@@ -482,7 +596,6 @@ def processar_rota_para_impressao(df_input):
     df_nao_volumosos_impressao = df_nao_volumosos[['Lista de Impressão', 'Address_Clean']].copy()
     
     # Retorna o DF original *limpo* (com colunas normalizadas) para o Split, se necessário
-    # NOTA: df_limpo_para_split_pos não é mais usado no split, mas mantido por segurança.
     df_limpo_para_split_pos = df[[COLUNA_ADDRESS_CIRCUIT, COLUNA_NOTES_CIRCUIT]].copy()
     df_limpo_para_split_pos.columns = ['Address', 'Notes'] # Normaliza os nomes para uso no Split
     
@@ -499,8 +612,14 @@ create_table_if_not_exists(conn)
 
 st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
 
-# CRIAÇÃO DAS ABAS 
-tab1, tab_split, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "✂️ Split Route (Dividir)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
+# CRIAÇÃO DAS ABAS - A NOVA ABA KML FOI ADICIONADA AQUI
+tab1, tab_split, tab2, tab3, tab_kml = st.tabs([
+    "🚀 Pré-Roteirização (Importação)", 
+    "✂️ Split Route (Dividir)", 
+    "📋 Pós-Roteirização (Impressão/Cópia)", 
+    "💾 Gerenciar Cache de Geolocalização", 
+    "🌍 Importar KML (Google Maps)" # NOVA ABA
+])
 
 
 # ----------------------------------------------------------------------------------
@@ -523,7 +642,7 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 with tab1:
     
     st.header("1. Gerar Arquivo para Importar no Circuit")
-    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match)** e agrupa os endereços.")
+    st.caption("Esta etapa aplica as correções de **Geolocalização do Cache (100% Match, incluindo KML)** e agrupa os endereços.")
 
     st.markdown("---")
     st.subheader("1.1 Carregar Planilha Original")
@@ -658,7 +777,7 @@ with tab1:
                 st.header("✅ Resultado Concluído!")
                 
                 if corrected_addresses:
-                    st.success(f"Cache de Geolocalização Aplicado! **{len(corrected_addresses)}** endereços únicos foram corrigidos (100% Match):")
+                    st.success(f"Cache de Geolocalização Aplicado! **{len(corrected_addresses)}** endereços únicos foram corrigidos (100% Match).")
                     corrected_text = '\n'.join([f"- {addr}" for addr in corrected_addresses])
                     with st.expander("Clique para ver a lista completa de endereços corrigidos pelo cache"):
                          st.markdown(corrected_text)
@@ -706,7 +825,7 @@ with tab1:
 
 
 # ----------------------------------------------------------------------------------
-# ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS) - AGORA PRÉ-ROTEIRIZAÇÃO COM DOWNLOADS INDIVIDUAIS
+# ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
 # ----------------------------------------------------------------------------------
 
 with tab_split:
@@ -778,7 +897,6 @@ with tab_split:
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
-# (Mantido o fluxo de carregamento de arquivo, pois o input é a SAÍDA DO CIRCUIT)
 # ----------------------------------------------------------------------------------
 
 with tab2:
@@ -938,7 +1056,6 @@ with tab2:
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO
-# (Mantido como estava)
 # ----------------------------------------------------------------------------------
 
 def clear_lat_lon_fields():
@@ -961,6 +1078,7 @@ def apply_google_coords():
     coord_string_clean = coord_string.strip()
     
     try:
+        # Tenta encontrar formato Lat, Lon (com ponto ou vírgula)
         matches = re.findall(r'(-?\d+[\.,]\d+)', coord_string_clean.replace(' ', ''))
         
         if len(matches) >= 2:
@@ -973,18 +1091,7 @@ def apply_google_coords():
             return
             
     except ValueError:
-        parts = coord_string_clean.split(',')
-        if len(parts) >= 2:
-             try:
-                lat = float(parts[0].replace(',', '.').strip()) 
-                lon = float(parts[1].replace(',', '.').strip())
-                
-                st.session_state['form_new_lat_num'] = lat
-                st.session_state['form_new_lon_num'] = lon
-                st.success(f"Coordenadas aplicadas: Lat: **{lat}**, Lon: **{lon}**")
-                return
-             except ValueError:
-                pass 
+        pass # Ignora erro de conversão e tenta o próximo formato
                 
     st.error(f"Não foi possível extrair duas coordenadas válidas da string: '{coord_string}'. Verifique o formato. Exemplo: -23.5139753, -52.1131268")
 
@@ -1075,7 +1182,8 @@ with tab3:
                 else:
                     try:
                         endereco_limpo = new_endereco.strip().rstrip(';')
-                        save_single_entry_to_db(conn, endereco_limpo, lat_to_save, lon_to_save)
+                        # Passa a origem como 'Manual'
+                        save_single_entry_to_db(conn, endereco_limpo, lat_to_save, lon_to_save, origem='Manual')
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}. Verifique o formato do endereço.")
         
@@ -1107,6 +1215,7 @@ with tab3:
         def export_cache(df_cache):
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+                # Adiciona 'Origem_Correcao' ao export
                 df_cache[CACHE_COLUMNS].to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
             buffer.seek(0)
             return buffer
@@ -1157,3 +1266,47 @@ with tab3:
                 clear_geoloc_cache_db(conn)
     else:
         st.info("O cache já está vazio. Não há dados para excluir.")
+
+# ----------------------------------------------------------------------------------
+# NOVA ABA: IMPORTAR KML
+# ----------------------------------------------------------------------------------
+
+with tab_kml:
+    st.header("🌍 Importar Pontos de Correção do Google Maps (KML)")
+    st.info("Esta função lê 'Placemarks' (marcadores) de um arquivo KML e os salva no cache de geolocalização. O **Nome do Placemark** será a chave do endereço de correção.")
+    
+    st.markdown("---")
+    st.subheader("1. Carregar Arquivo KML")
+
+    uploaded_kml = st.file_uploader(
+        "Arraste e solte o arquivo KML (.kml) do Google Maps/Earth aqui:", 
+        type=['kml'],
+        key="file_kml"
+    )
+    
+    if uploaded_kml is not None:
+        
+        st.success(f"Arquivo '{uploaded_kml.name}' carregado! Clique em 'Processar KML' para extrair os dados.")
+        
+        if st.button("➡️ Processar KML e Extrair Dados", key="btn_parse_kml"):
+            
+            df_kml = parse_kml_data(uploaded_kml)
+            
+            if not df_kml.empty:
+                st.markdown("---")
+                st.subheader(f"✅ {len(df_kml)} Pontos Encontrados no KML")
+                st.caption("Verifique se o nome do endereço (**Endereco_KML**) e as coordenadas estão corretos. O nome do endereço deve ser a chave de correção.")
+                
+                # Exibe o DataFrame para conferência
+                st.dataframe(df_kml, use_container_width=True)
+                
+                st.markdown("---")
+                st.warning("⚠️ **ATENÇÃO:** O endereço do KML será a **chave exata** para a correção. Certifique-se de que ele corresponde ao formato **'Endereço, Bairro'** que você usa no cache.")
+                
+                if st.button(f"💾 Salvar {len(df_kml)} Pontos no Cache de Geolocalização", key="btn_save_kml_to_cache"):
+                    import_kml_to_db(conn, df_kml)
+                    
+            else:
+                st.error("O arquivo KML foi carregado, mas não foi possível extrair nenhum 'Placemark' (ponto). Verifique se o arquivo está no formato correto.")
+
+# ----------------------------------------------------------------------------------

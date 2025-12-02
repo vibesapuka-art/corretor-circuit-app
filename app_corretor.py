@@ -227,7 +227,7 @@ def export_cache(df_cache, file_format='xlsx'):
 
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - REFORÇO)
+# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA - REFORÇO 2)
 # ===============================================
 
 @st.cache_data
@@ -238,9 +238,11 @@ def parse_kml_data(uploaded_file):
     k = kml.KML()
     
     try:
-        # Tenta o parsing de KMZ (ZIP)
+        # Tenta o parsing de KMZ (ZIP) - AGORA USANDO from_kmz()
         if uploaded_file.name.lower().endswith('.kmz'):
-            k.from_bytes(file_bytes)
+            # CORREÇÃO PARA O ERRO 'KML' object has no attribute 'from_bytes'
+            # from_kmz() é o método mais compatível para KMZ
+            k.from_kmz(file_bytes) 
         else:
             # Tenta o parsing de KML/XML como string UTF-8
             k.from_string(file_bytes.decode('utf-8')) 
@@ -346,7 +348,7 @@ def import_kml_to_db(conn, df_kml_import):
         return 0
 
 
-# [ ... Funções de PRÉ/PÓS-ROTEIRIZAÇÃO inalteradas ... ]
+# [ ... Funções de PRÉ/PÓS-ROTEIRIZAÇÃO e LÓGICA DE INTERFACE (tab1, tab_split, tab2, tab3) INALTERADAS ... ]
 
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -644,8 +646,6 @@ if 'df_kml_extraido' not in st.session_state:
     st.session_state['df_kml_extraido'] = pd.DataFrame()
 
 
-# [ ... Conteúdo da Aba 1: PRÉ-ROTEIRIZAÇÃO (Inalterado) ... ]
-
 # ----------------------------------------------------------------------------------
 # ABA 1: PRÉ-ROTEIRIZAÇÃO (CORREÇÃO E IMPORTAÇÃO)
 # ----------------------------------------------------------------------------------
@@ -833,8 +833,6 @@ with tab1:
                 st.info("Agora, você pode usar o arquivo na aba **✂️ Split Route** ou este arquivo geral no Circuit.")
 
 
-# [ ... Conteúdo da Aba 1.5: SPLIT ROUTE (Inalterado) ... ]
-
 # ----------------------------------------------------------------------------------
 # ABA 1.5: SPLIT ROUTE (DIVIDIR ROTAS)
 # ----------------------------------------------------------------------------------
@@ -878,7 +876,7 @@ with tab_split:
                 st.dataframe(df_rota, use_container_width=True)
                 
                 buffer_individual = io.BytesIO()
-                with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
+                with pd.ExcelWriter(buffer_individual, engine='openynxl') as writer:
                     df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
                     
                 buffer_individual.seek(0)
@@ -895,8 +893,6 @@ with tab_split:
             
             st.markdown("---")
             st.info("Cada arquivo baixado contém a lista de paradas na ordem sequencial, com coordenadas, para ser otimizada individualmente no Circuit/Spoke.")
-
-# [ ... Conteúdo da Aba 2: PÓS-ROTEIRIZAÇÃO (Inalterado) ... ]
 
 # ----------------------------------------------------------------------------------
 # ABA 2: PÓS-ROTEIRIZAÇÃO (LIMPEZA P/ IMPRESSÃO E SEPARAÇÃO DE VOLUMOSOS)
@@ -1055,8 +1051,6 @@ with tab2:
                 key="download_list"
             )
 
-
-# [ ... Conteúdo da Aba 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO (Agora com opção CSV de backup) ... ]
 
 # ----------------------------------------------------------------------------------
 # ABA 3: GERENCIAR CACHE DE GEOLOCALIZAÇÃO

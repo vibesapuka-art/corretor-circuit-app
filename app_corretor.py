@@ -198,7 +198,7 @@ def clear_geoloc_cache_db(conn):
 
 
 # ===============================================
-# FUNÇÕES DE KML/KMZ/XML (ATUALIZADA)
+# FUNÇÕES DE KML/KMZ/XML (CORRIGIDA)
 # ===============================================
 
 @st.cache_data
@@ -209,21 +209,28 @@ def parse_kml_data(uploaded_file):
     k = kml.KML()
     
     try:
-        # O fastkml faz o parse KML e KMZ (ZIP) automaticamente.
-        # Ele tentará ler qualquer XML/KML, independentemente da extensão.
+        # Tenta o parsing de KMZ (ZIP)
         if uploaded_file.name.lower().endswith('.kmz'):
             k.from_bytes(file_bytes)
         else:
-            # Tenta decodificar como UTF-8 (padrão para KML/XML)
+            # Tenta o parsing de KML/XML como string UTF-8
             k.from_string(file_bytes.decode('utf-8')) 
             
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo. Certifique-se de que ele está no formato KML (mesmo que com extensão .xml ou .kml). Erro: {e}")
+        # Erro durante o parsing (arquivo corrompido, formato inválido, etc.)
+        st.error(f"Erro ao tentar processar o arquivo. Verifique se ele é um KML/KMZ válido. Erro: {e}")
         return pd.DataFrame()
+    
+    # --- BLOCO DE VERIFICAÇÃO PARA EVITAR 'NoneType' object is not callable ---
+    # Se k não foi configurado corretamente (fastkml falha silenciosa ou parcial), features() pode ser None
+    if k.features is None: 
+         st.error("Erro de Estrutura: O arquivo KML/KMZ foi carregado, mas a biblioteca não conseguiu extrair nenhuma 'feature' (estrutura principal). O arquivo pode não ser um KML válido.")
+         return pd.DataFrame()
+    # ---------------------------------
     
     data = []
     
-    # Percorrendo a estrutura KML
+    # Percorrendo a estrutura KML (AGORA SEGURO)
     for feature in k.features():
         # Percorre as features principais (Document, Folder, Placemark)
         if isinstance(feature, kml.Document):
@@ -999,7 +1006,7 @@ with tab2:
                 df_final_geral[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Impressao Geral')
                 
                 if df_nao_volumosos_impressao is not None and not df_nao_volumosos_impressao.empty:
-                    df_nao_volumosos_impressao[['Lista de Impressão']].toel(writer, index=False, sheet_name='Lista Nao Volumosos')
+                    df_nao_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Nao Volumosos')
                     
                 if df_volumosos_impressao is not None and not df_volumosos_impressao.empty:
                     df_volumosos_impressao[['Lista de Impressão']].to_excel(writer, index=False, sheet_name='Lista Volumosos')

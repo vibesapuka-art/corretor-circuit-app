@@ -1,5 +1,3 @@
-Estou com problema em meu aplicativo ele não sai dessa parte esterei enviando o print.
-
 # -*- coding: utf-8 -*-
 import pandas as pd
 import re
@@ -1791,3 +1789,4 @@ with tab_geodata_import:
                     
             elif uploaded_kml_kmz is not None and st.session_state['df_kml_extraido'].empty:
                  st.info("Carregue o arquivo e clique em 'Processar KML/KMZ/XML e Extrair Dados'.")
+

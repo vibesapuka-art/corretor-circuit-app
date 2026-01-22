@@ -1,144 +1,760 @@
+Esse e o código que tô usando me manda ele completo e atualizado
+
+# -*- coding: utf-8 -*-
 import pandas as pd
 import re
 from rapidfuzz import process, fuzz
-import io # Para manipulação de arquivos na memória
-import streamlit as st # Biblioteca para criar a interface web
+import io
+import streamlit as st
+import sqlite3 
+import math
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, ColumnsAutoSizeMode
+from fastkml import kml
+import zipfile 
 
-# --- Configurações Principais ---
-COLUNA_ENDERECO = 'Destination Address'
-COLUNA_SEQUENCE = 'Sequence'
-LIMITE_SIMILARIDADE = 90 
-
-
-def limpar_endereco(endereco):
-    """Normaliza o texto do endereço para melhor comparação."""
-    if pd.isna(endereco):
-        return ""
-    endereco = str(endereco).lower().strip()
-    endereco = re.sub(r'[^\w\s]', '', endereco)
-    endereco = re.sub(r'\s+', ' ', endereco)
-    endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
-    return endereco
-
-
-@st.cache_data # Cache para otimizar a execução de funções pesadas
-def processar_e_corrigir_dados(df_entrada):
-    """
-    Função principal que aplica toda a lógica de correção, agrupamento e formatação.
-    """
-    df = df_entrada.copy()
-
-    # 1. Limpeza e Normalização
-    df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
-    enderecos_unicos = df['Endereco_Limpo'].unique()
-    mapa_correcao = {}
-    
-    # 2. Fuzzy Matching e Geração do Mapa de Correção
-    for end_principal in enderecos_unicos:
-        if end_principal not in mapa_correcao:
-            matches = process.extract(
-                end_principal, 
-                enderecos_unicos, 
-                scorer=fuzz.WRatio, 
-                limit=None
-            )
-            grupo_matches = [
-                match[0] for match in matches 
-                if match[1] >= LIMITE_SIMILARIDADE
-            ]
-            
-            df_grupo = df[df['Endereco_Limpo'].isin(grupo_matches)]
-            endereco_oficial_original = df_grupo[COLUNA_ENDERECO].mode()[0]
-            
-            for end_similar in grupo_matches:
-                mapa_correcao[end_similar] = endereco_oficial_original
-
-    # 3. Aplicação do Endereço Corrigido
-    df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
-
-    # 4. Agrupamento e Concatenação dos Dados
-    colunas_agrupamento = ['Endereco_Corrigido', 'Bairro', 'City', 'Zipcode/Postal code']
-    
-    df_agrupado = df.groupby(colunas_agrupamento).agg(
-        Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x)))),
-        Total_Pacotes=(COLUNA_SEQUENCE, 'count'),
-        Latitude=('Latitude', 'first'),
-        Longitude=('Longitude', 'first')
-    ).reset_index()
-
-    # 5. Formatação para o Circuit
-    endereco_completo = (
-        df_agrupado['Endereco_Corrigido'] + ', ' + 
-        df_agrupado['Bairro']
-    )
-    
-    notas_completas = (
-        'Pacotes: ' + df_agrupado['Total_Pacotes'].astype(str) + 
-        ' | Cidade: ' + df_agrupado['City'] + 
-        ' | CEP: ' + df_agrupado['Zipcode/Postal code']
-    )
-
-    # CRIAÇÃO DO DATAFRAME FINAL NA ORDEM CORRETA
-    df_circuit = pd.DataFrame({
-        'Order ID': df_agrupado['Sequences_Agrupadas'],  # PRIMEIRA COLUNA
-        'Address': endereco_completo,
-        'Latitude': df_agrupado['Latitude'],
-        'Longitude': df_agrupado['Longitude'],
-        'Notes': notas_completas
-    })
-    
-    return df_circuit
-
-# --- Interface Streamlit ---
-
-st.title("🗺️ Corretor de Endereços para Circuit")
-st.markdown("---")
-st.markdown("Esta ferramenta usa Fuzzy Matching para agrupar endereços semelhantes e gerar um arquivo otimizado para importação no Circuit.")
-
-# Widget para fazer upload do arquivo
-uploaded_file = st.file_uploader(
-    "1. Arraste e solte sua planilha (.csv ou .xlsx)", 
-    type=['csv', 'xlsx']
+# --- Configurações Iniciais da Página ---
+st.set_page_config(
+    page_title="Circuit Flow Completo",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-if uploaded_file is not None:
-    # 2. Carregar o arquivo
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df_input = pd.read_csv(uploaded_file)
-        else:
-            # Assume que é XLSX se não for CSV
-            df_input = pd.read_excel(uploaded_file)
-        
-        st.success(f"Arquivo '{uploaded_file.name}' carregado com sucesso! Total de {len(df_input)} registros.")
+# --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
+st.markdown("""
+<style>
+/* Estilo para garantir alinhamento à esquerda em textareas e inputs */
+.stTextArea [data-baseweb="base-input"], 
+.stTextInput [data-baseweb="base-input"] {
+    text-align: left;
+    font-family: monospace;
+}
+div.stTextArea > label,
+div.stTextInput > label {
+    text-align: left !important; 
+}
+div[data-testid="stTextarea"] textarea {
+    text-align: left !important; 
+    font-family: monospace;
+    white-space: pre-wrap;
+}
+h1, h2, h3, h4, .stMarkdown {
+    text-align: left !important;
+}
+.ag-header-cell-text {
+    white-space: normal !important;
+    line-height: 1.2 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+# --------------------------------------------------------------------------------------
 
-        # Botão para iniciar o processamento
-        if st.button("2. Processar e Corrigir Endereços"):
-            with st.spinner('Corrigindo e agrupando endereços...'):
-                df_resultado = processar_e_corrigir_dados(df_input)
-            
-            st.markdown("---")
-            st.header("✅ Processamento Concluído!")
-            st.write(f"Endereços agrupados: **{len(df_resultado)}** (de {len(df_input)} entradas originais).")
-            
-            # Exibir amostra
-            st.subheader("Amostra do Arquivo Final")
-            st.dataframe(df_resultado.head(10))
-            
-            # 3. Botão para Download
-            # Converte o DataFrame para o formato Excel na memória
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_resultado.to_excel(writer, index=False, sheet_name='Circuit Import')
-            buffer.seek(0)
-            
-            st.download_button(
-                label="3. Baixar Arquivo Circuit_Import_FINAL.xlsx",
-                data=buffer,
-                file_name="Circuit_Import_FINAL.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_excel"
-            )
 
-    except Exception as e:
-        st.error(f"Ocorreu um erro ao processar o arquivo. Verifique se as colunas 'Destination Address' e 'Sequence' estão presentes. Erro: {e}")
+# --- Configurações Globais (Colunas) ---
+COLUNA_ENDERECO = 'Destination Address'
+COLUNA_SEQUENCE = 'Sequence'
+COLUNA_LATITUDE = 'Latitude'
+COLUNA_LONGITUDE = 'Longitude'
+COLUNA_BAIRRO = 'Bairro' 
+
+# Colunas esperadas no arquivo de Pós-Roteirização (Saída do Circuit)
+COLUNA_ADDRESS_CIRCUIT = 'address' 
+COLUNA_NOTES_CIRCUIT = 'notes'
+
+
+# --- Configurações de MIME Type ---
+EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# --- Configurações de Banco de Dados ---
+DB_NAME = "geoloc_cache.sqlite"
+TABLE_NAME = "correcoes_geoloc_v3" 
+CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Origem_Correcao']
+PRIMARY_KEYS = ['Endereco_Completo_Cache'] 
+
+# Colunas esperadas no CSV de exportação do Google Maps
+GMAPS_COL_ADDRESS = 'Destination Address'
+GMAPS_COL_BAIRRO = 'Bairro'
+GMAPS_COL_CITY = 'City'
+GMAPS_COL_ZIPCODE = 'Zipcode/Postal code'
+GMAPS_COL_LAT = 'Latitude'
+GMAPS_COL_LON = 'Longitude'
+
+
+# ===============================================
+# FUNÇÕES HELPER (CALLBACKS DE FORMULÁRIO)
+# ===============================================
+
+def apply_google_coords():
+    """Converte string de coordenadas (Lat, Lon) para os campos numéricos do formulário."""
+    coord_str = st.session_state.get('form_colar_coord', "")
+    if not coord_str:
+        return
+
+    # Limpeza e tentativa de extração de dois números
+    # Permite vírgula ou espaço ou ponto e vírgula como separador, e ponto como decimal
+    cleaned_str = coord_str.strip().replace(';', ',').replace(' ', ',')
+    cleaned_str = re.sub(r',+', ',', cleaned_str)
+    
+    parts = cleaned_str.split(',')
+    
+    # Filtra por partes que se parecem com floats (pode ter um sinal de menos)
+    numeric_parts = []
+    for p in parts:
+        p = p.strip()
+        if p:
+            # Tenta converter para float para garantir que é um número válido
+            try:
+                float(p)
+                numeric_parts.append(p)
+            except ValueError:
+                continue
+
+    if len(numeric_parts) >= 2:
+        try:
+            # Assumimos o padrão Lat, Lon (mais comum no Google Maps)
+            lat = float(numeric_parts[0])
+            lon = float(numeric_parts[1])
+            
+            # Validação simples: Lat entre -90/90, Lon entre -180/180.
+            # Se Lat > 90, assume que o usuário inverteu e tenta a correção.
+            if abs(lat) > 90 and abs(lon) <= 90:
+                 lat_temp = lat
+                 lat = lon
+                 lon = lat_temp
+
+            if abs(lat) <= 90 and abs(lon) <= 180:
+                st.session_state['form_new_lat_num'] = lat
+                st.session_state['form_new_lon_num'] = lon
+                st.session_state['form_colar_coord'] = "" # Limpa o campo de texto
+                st.success(f"Coordenadas aplicadas: Lat {lat:.8f}, Lon {lon:.8f}")
+            else:
+                 st.error("Coordenadas inválidas detectadas. Verifique a ordem ou se os valores são válidos.")
+                 
+        except ValueError:
+            st.error("Formato de coordenada inválido. Certifique-se de usar ponto para decimais e separador (vírgula ou espaço) entre Lat e Lon.")
+    else:
+        st.error("Não foi possível encontrar duas coordenadas válidas (Latitude e Longitude) na string colada.")
+
+def clear_lat_lon_fields():
+    """Limpa todos os campos do formulário de entrada manual de cache."""
+    if 'form_new_endereco' in st.session_state:
+        st.session_state['form_new_endereco'] = ""
+    if 'form_colar_coord' in st.session_state:
+        st.session_state['form_colar_coord'] = ""
+    if 'form_new_lat_num' in st.session_state:
+        st.session_state['form_new_lat_num'] = 0.0
+    if 'form_new_lon_num' in st.session_state:
+        st.session_state['form_new_lon_num'] = 0.0
+    st.success("Formulário de correção limpo.")
+
+
+# ===============================================
+# FUNÇÕES DE BANCO DE Dados (SQLite)
+# ===============================================
+
+@st.cache_resource
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
+    return conn
+
+def create_table_if_not_exists(conn):
+    pk_str = ', '.join(PRIMARY_KEYS)
+    query = f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+        Endereco_Completo_Cache TEXT PRIMARY KEY,
+        Latitude_Corrigida REAL,
+        Longitude_Corrigida REAL,
+        Origem_Correcao TEXT DEFAULT 'Manual'
+    );
+    """
+    try:
+        conn.execute(query)
+        conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao criar tabela: {e}")
+
+@st.cache_data(hash_funcs={sqlite3.Connection: lambda _: "constant_db_hash"})
+def load_geoloc_cache(conn):
+    try:
+        df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
+        
+        if 'Origem_Correcao' not in df_cache.columns:
+            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN Origem_Correcao TEXT DEFAULT 'Manual'")
+            conn.commit()
+            df_cache = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn) 
+            
+        df_cache['Latitude_Corrigida'] = pd.to_numeric(df_cache['Latitude_Corrigida'], errors='coerce')
+        df_cache['Longitude_Corrigida'] = pd.to_numeric(df_cache['Longitude_Corrigida'], errors='coerce')
+        return df_cache
+    except pd.io.sql.DatabaseError:
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+    except Exception as e:
+        st.error(f"Erro ao carregar cache de geolocalização: {e}")
+        return pd.DataFrame(columns=CACHE_COLUMNS)
+
+
+def save_single_entry_to_db(conn, endereco, lat, lon, origem='Manual'):
+    upsert_query = f"""
+    INSERT OR REPLACE INTO {TABLE_NAME} 
+    (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+    VALUES (?, ?, ?, ?);
+    """
+    try:
+        conn.execute(upsert_query, (endereco, lat, lon, origem))
+        conn.commit()
+        st.success(f"Correção salva para: **{endereco}** (Origem: {origem}).")
+        load_geoloc_cache.clear() 
+        st.rerun() 
+    except Exception as e:
+        st.error(f"Erro ao salvar a correção no banco de dados: {e}")
+        
+def clear_geoloc_cache_db(conn):
+    query = f"DELETE FROM {TABLE_NAME};"
+    try:
+        conn.execute(query)
+        conn.commit()
+        load_geoloc_cache.clear()
+        st.success("✅ **Sucesso!** Todos os dados do cache de geolocalização foram excluídos permanentemente.")
+        st.rerun() 
+    except Exception as e:
+        st.error(f"❌ Erro ao limpar o cache: {e}")
+
+def export_cache(df_cache, file_format='xlsx'):
+    """Exporta o DataFrame de cache em XLSX ou CSV, garantindo o separador correto."""
+    
+    df_export = df_cache[CACHE_COLUMNS].copy()
+    
+    # Garantir que Lat/Lon usem ponto para CSV e 8 casas decimais
+    df_export['Latitude_Corrigida'] = pd.to_numeric(df_export['Latitude_Corrigida'], errors='coerce').round(8)
+    df_export['Longitude_Corrigida'] = pd.to_numeric(df_export['Longitude_Corrigida'], errors='coerce').round(8)
+    
+    buffer = io.BytesIO()
+    
+    if file_format == 'xlsx':
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer: 
+            df_export.to_excel(writer, index=False, sheet_name='Cache_Geolocalizacao')
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "cache_geolocalizacao_backup.xlsx"
+    
+    elif file_format == 'csv':
+        # Cria o CSV no buffer com separador "," (vírgula)
+        df_export.to_csv(buffer, index=False, sep=',', encoding='utf-8')
+        mime = "text/csv"
+        filename = "cache_geolocalizacao_backup.csv"
+        
+    else:
+        raise ValueError("Formato de arquivo não suportado para exportação.")
+        
+    buffer.seek(0)
+    return buffer, mime, filename
+
+
+# ===============================================
+# FUNÇÕES DE KML/KMZ/XML
+# ===============================================
+
+@st.cache_data
+def parse_kml_data(uploaded_file):
+    """Lê um arquivo KML, KMZ ou XML e extrai nome (Endereço), Lat e Lon dos PlaceMarks."""
+    
+    file_bytes = uploaded_file.getvalue()
+    k = kml.KML()
+    
+    is_kmz = uploaded_file.name.lower().endswith('.kmz')
+    
+    try:
+        if is_kmz:
+            # Tenta o método moderno/comum (from_bytes), que deveria funcionar na maioria das versões novas
+            try:
+                k.from_bytes(file_bytes) 
+            except AttributeError:
+                # PLANO B: Descompactação Manual do KMZ
+                st.info("Tentando descompactação manual do KMZ (Plano B) devido a erro de 'from_bytes'.")
+                with zipfile.ZipFile(io.BytesIO(file_bytes), 'r') as kmz_file:
+                    # O arquivo KML principal dentro do KMZ geralmente é doc.kml
+                    kml_name_list = [name for name in kmz_file.namelist() if name.endswith('.kml')]
+                    if not kml_name_list:
+                         raise IndexError("Nenhum arquivo .kml encontrado dentro do KMZ.")
+                    
+                    kml_name = kml_name_list[0]
+                    kml_content = kmz_file.read(kml_name)
+                    # Usa k.from_string() que é universal
+                    k.from_string(kml_content.decode('utf-8'))
+        else:
+            # Tenta o parsing de KML/XML como string UTF-8
+            k.from_string(file_bytes.decode('utf-8')) 
+            
+    except IndexError as ie:
+         st.error(f"Erro: O arquivo KMZ não contém um arquivo .kml principal. Detalhe: {ie}")
+         return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro Crítico ao processar o arquivo. Verifique se ele é um KML/KMZ válido. Erro: {e}")
+        return pd.DataFrame()
+    
+    data = []
+    
+    try:
+        features_to_iterate = list(k.features())
+    except Exception as e:
+        st.error(f"Erro ao tentar acessar os elementos KML. O arquivo está corrompido ou o formato é inválido (Tipo de erro: {type(e).__name__}).")
+        return pd.DataFrame()
+    
+    for feature in features_to_iterate:
+        if isinstance(feature, kml.Document):
+            for doc_feature in feature.features():
+                if isinstance(doc_feature, kml.Folder):
+                    for folder_feature in doc_feature.features():
+                        if isinstance(folder_feature, kml.Placemark) and folder_feature.geometry:
+                             coords = list(folder_feature.geometry.coords)[0]
+                             data.append({
+                                 'Endereco_KML': folder_feature.name,
+                                 'Longitude_KML': coords[0],
+                                 'Latitude_KML': coords[1]
+                             })
+                elif isinstance(doc_feature, kml.Placemark) and doc_feature.geometry:
+                    coords = list(doc_feature.geometry.coords)[0]
+                    data.append({
+                        'Endereco_KML': doc_feature.name,
+                        'Longitude_KML': coords[0],
+                        'Latitude_KML': coords[1]
+                    })
+        elif isinstance(feature, kml.Placemark) and feature.geometry:
+             coords = list(feature.geometry.coords)[0]
+             data.append({
+                 'Endereco_KML': feature.name,
+                 'Longitude_KML': coords[0],
+                 'Latitude_KML': coords[1]
+             })
+
+    if not data:
+        st.warning("Nenhum 'Placemark' (parada) com coordenadas válidas foi encontrado no seu KML/KMZ/XML.")
+        return pd.DataFrame()
+        
+    df_kml = pd.DataFrame(data)
+    df_kml['Endereco_Completo_Cache'] = df_kml['Endereco_KML'].astype(str).str.strip().str.rstrip(';')
+    df_kml['Latitude_Corrigida'] = pd.to_numeric(df_kml['Latitude_KML'], errors='coerce')
+    df_kml['Longitude_Corrigida'] = pd.to_numeric(df_kml['Longitude_KML'], errors='coerce')
+
+    return df_kml.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']]
+
+
+def import_kml_to_db(conn, df_kml_import):
+    """Insere os dados do KML/KMZ/XML no banco de dados de cache. (Simple Upsert - Sem conflito)"""
+    
+    if df_kml_import.empty:
+        st.error("Nenhum dado válido para importar.")
+        return 0
+        
+    insert_count = 0
+    
+    try:
+        with st.spinner(f"Processando a importação de {len(df_kml_import)} paradas do KML/KMZ/XML..."):
+            for index, row in df_kml_import.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+                VALUES (?, ?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon, 'KML_Import'))
+                insert_count += 1
+            
+            conn.commit()
+            load_geoloc_cache.clear() 
+            count_after = len(load_geoloc_cache(conn)) 
+            st.success(f"✅ Importação de KML/KMZ/XML concluída! **{insert_count}** entradas processadas. O cache agora tem **{count_after}** entradas.")
+            st.rerun() 
+            return count_after
+            
+    except Exception as e:
+        st.error(f"Erro crítico ao inserir dados do KML/KMZ/XML no cache. Erro: {e}")
+        return 0
+
+# ===============================================
+# FUNÇÃO DE CONVERSÃO DE CSV GOOGLE MAPS (CORREÇÃO FORÇADA)
+# ===============================================
+
+@st.cache_data
+def convert_google_maps_csv(uploaded_file):
+    """
+    Tenta ler o CSV original. Se falhar, aplica o reparo interno forçado
+    para corrigir a quebra da coluna 'Destination Address' causada por vírgulas.
+    """
+    
+    # [Mantém a lógica de reparo do CSV que funcionou para o usuário]
+    # 1. Leitura do arquivo como texto para reparo
+    uploaded_file.seek(0)
+    try:
+        content = uploaded_file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        uploaded_file.seek(0)
+        content = uploaded_file.read().decode('latin-1')
+    except Exception as e:
+        st.error(f"Erro Crítico de Leitura de Arquivo: {e}")
+        return pd.DataFrame()
+        
+    lines = content.strip().splitlines()
+    if not lines:
+        st.error("Arquivo CSV vazio.")
+        return pd.DataFrame()
+
+    # 2. Identificação do cabeçalho e estrutura
+    header = lines[0]
+    data_lines = lines[1:]
+    
+    colunas_finais = [
+        'WKT', 'AT ID', 'Sequence', 'Stop', 'SPX TN', 
+        GMAPS_COL_ADDRESS, GMAPS_COL_BAIRRO, GMAPS_COL_CITY, GMAPS_COL_ZIPCODE, 
+        GMAPS_COL_LAT, GMAPS_COL_LON
+    ]
+
+    reparsed_data = [header] 
+    NUM_FIXED_PREFIX = 4 
+    NUM_FIXED_SUFFIX = 5 
+
+    for line in data_lines:
+        if not line.strip(): continue
+
+        match = re.match(r'(".*?")(,(.*))', line)
+        if not match:
+             reparsed_data.append(line) 
+             continue
+             
+        wkt_col = match.group(1) 
+        rest_of_line = match.group(3) 
+        
+        parts = [p.strip() for p in rest_of_line.split(',')]
+        N_parts = len(parts)
+
+        if N_parts == (len(colunas_finais) - 1):
+             reparsed_data.append(line)
+             continue
+        
+        # --- REPARO INTERNO FORÇADO ---
+        try:
+            suffix = parts[-NUM_FIXED_SUFFIX:] 
+            prefix = parts[0:NUM_FIXED_PREFIX]
+            middle_parts_raw = parts[NUM_FIXED_PREFIX:N_parts - NUM_FIXED_SUFFIX] 
+            
+            if len(prefix) == NUM_FIXED_PREFIX and len(suffix) == NUM_FIXED_SUFFIX and middle_parts_raw:
+                
+                destination_address_quoted = '"' + ', '.join(middle_parts_raw).strip() + '"'
+                
+                new_line = (
+                    wkt_col + ',' + 
+                    ','.join(prefix) + ',' + 
+                    destination_address_quoted + ',' + 
+                    ','.join(suffix)
+                )
+                reparsed_data.append(new_line)
+            else:
+                reparsed_data.append(line)
+
+        except Exception as e:
+            reparsed_data.append(line)
+
+    # 5. Leitura da linha de dados reparada com Pandas
+    try:
+        df = pd.read_csv(io.StringIO('\n'.join(reparsed_data)), sep=',')
+        
+        if len(df.columns) != 11:
+             st.error(f"O reparo resultou em um número incorreto de colunas: {len(df.columns)}. Colunas esperadas: 11.")
+             return pd.DataFrame()
+             
+    except Exception as e:
+        st.error(f"❌ Erro Crítico: Falha na leitura do CSV após o reparo interno. Erro: {e}")
+        return pd.DataFrame()
+    
+    # ---------------------------------------------------------------------------------------------------------------------
+    # CONCATENAÇÃO FINAL
+    # ---------------------------------------------------------------------------------------------------------------------
+    
+    required_cols = [GMAPS_COL_ADDRESS, GMAPS_COL_BAIRRO, GMAPS_COL_CITY, GMAPS_COL_LAT, GMAPS_COL_LON]
+    
+    if not all(col in df.columns for col in required_cols):
+        missing = [col for col in required_cols if col not in df.columns]
+        st.error(f"O arquivo CSV do Google Maps está faltando colunas essenciais. Colunas faltando: {', '.join(missing)}")
+        return pd.DataFrame()
+    
+    if GMAPS_COL_ZIPCODE not in df.columns:
+         df[GMAPS_COL_ZIPCODE] = ""
+         
+    df = df.fillna('')
+    
+    endereco_principal = df[GMAPS_COL_ADDRESS].astype(str).str.strip().str.strip('"')
+    
+    df['Endereco_Completo_Cache'] = endereco_principal
+    
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_BAIRRO].strip()}" if row[GMAPS_COL_BAIRRO].strip() else row['Endereco_Completo_Cache'],
+        axis=1
+    )
+    
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_CITY].strip()}" if row[GMAPS_COL_CITY].strip() and row[GMAPS_COL_CITY].strip() not in row[GMAPS_COL_BAIRRO].strip() else row['Endereco_Completo_Cache'],
+        axis=1
+    )
+    
+    df['Endereco_Completo_Cache'] = df.apply(
+        lambda row: f"{row['Endereco_Completo_Cache']}, {row[GMAPS_COL_ZIPCODE].strip()}" if row[GMAPS_COL_ZIPCODE].strip() else row['Endereco_Completo_Cache'],
+        axis=1
+    )
+    
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*,', ',', regex=True)
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r'^\s*,', '', regex=True) 
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.replace(r',\s*$', '', regex=True) 
+    df['Endereco_Completo_Cache'] = df['Endereco_Completo_Cache'].str.strip()
+
+    # ---------------------------------------------------------------------------------------------------------------------
+
+    df = df.rename(columns={
+        GMAPS_COL_LAT: 'Latitude_Corrigida',
+        GMAPS_COL_LON: 'Longitude_Corrigida'
+    })
+    
+    df_final = df[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    
+    # Garante que as coordenadas são numéricas para comparação
+    df_final['Latitude_Corrigida'] = pd.to_numeric(df_final['Latitude_Corrigida'], errors='coerce')
+    df_final['Longitude_Corrigida'] = pd.to_numeric(df_final['Longitude_Corrigida'], errors='coerce')
+    
+    df_final = df_final.dropna(subset=['Latitude_Corrigida', 'Longitude_Corrigida'])
+
+    if df_final.empty:
+        st.error("Nenhuma linha com Lat/Lon válida foi encontrada após a conversão.")
+        return pd.DataFrame()
+        
+    return df_final.drop_duplicates(subset=['Endereco_Completo_Cache'])
+
+# ===============================================
+# FUNÇÕES DE SINCRONIZAÇÃO DE CACHE (NOVO)
+# ===============================================
+
+def manage_cache_overwrite(df_new_corrections, cache_df):
+    """
+    Compara as novas correções do CSV com o cache existente para identificar
+    novas entradas e conflitos de geolocalização.
+    """
+    
+    # 1. Prepare new corrections
+    df_new = df_new_corrections[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    df_new = df_new.rename(columns={'Latitude_Corrigida': 'New_Lat', 'Longitude_Corrigida': 'New_Lon'})
+    df_new['Endereco_Completo_Cache'] = df_new['Endereco_Completo_Cache'].astype(str).str.strip().str.rstrip(';')
+    
+    # 2. Prepare existing cache for merge
+    df_cache_for_merge = cache_df[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    df_cache_for_merge.columns = ['Endereco_Completo_Cache', 'Cache_Lat', 'Cache_Lon']
+    
+    # 3. Merge to find matches
+    df_merged = pd.merge(
+        df_new, 
+        df_cache_for_merge, 
+        on='Endereco_Completo_Cache', 
+        how='left'
+    )
+    
+    # 4. Identify NEW entries (no match in cache)
+    df_new_entries = df_merged[df_merged['Cache_Lat'].isna()].copy()
+    df_new_entries = df_new_entries.rename(columns={'New_Lat': 'Latitude_Corrigida', 'New_Lon': 'Longitude_Corrigida'})
+    df_new_entries = df_new_entries[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida']].copy()
+    
+    # 5. Identify OVERWRITES/CONFLICTS (match found)
+    df_conflicts = df_merged[df_merged['Cache_Lat'].notna()].copy()
+    
+    # Calcula a diferença: 0.00001 grau é aproximadamente 1 metro de diferença, considerado um conflito.
+    TOLERANCE = 0.00001
+    
+    df_conflicts['New_Lat'] = pd.to_numeric(df_conflicts['New_Lat'], errors='coerce')
+    df_conflicts['New_Lon'] = pd.to_numeric(df_conflicts['New_Lon'], errors='coerce')
+    df_conflicts['Cache_Lat'] = pd.to_numeric(df_conflicts['Cache_Lat'], errors='coerce')
+    df_conflicts['Cache_Lon'] = pd.to_numeric(df_conflicts['Cache_Lon'], errors='coerce')
+    df_conflicts.dropna(subset=['New_Lat', 'New_Lon', 'Cache_Lat', 'Cache_Lon'], inplace=True)
+
+    lat_diff = abs(df_conflicts['New_Lat'] - df_conflicts['Cache_Lat'])
+    lon_diff = abs(df_conflicts['New_Lon'] - df_conflicts['Cache_Lon'])
+    
+    # Mantém apenas as alterações significativas (conflitos)
+    conflict_mask = (lat_diff > TOLERANCE) | (lon_diff > TOLERANCE)
+    df_conflicts_to_overwrite = df_conflicts[conflict_mask].copy()
+    
+    # Adiciona a coluna com as coordenadas novas para visualização
+    df_conflicts_to_overwrite.rename(columns={
+        'New_Lat': 'Latitude_Nova', 
+        'New_Lon': 'Longitude_Nova',
+        'Cache_Lat': 'Latitude_Atual',
+        'Cache_Lon': 'Longitude_Atual'
+    }, inplace=True)
+    
+    # Seleciona colunas de interesse para o relatório de conflitos
+    df_conflicts_report = df_conflicts_to_overwrite[['Endereco_Completo_Cache', 'Latitude_Atual', 'Longitude_Atual', 'Latitude_Nova', 'Longitude_Nova']]
+    
+    return df_new_entries, df_conflicts_report
+
+def perform_upsert(conn, df_to_upsert, origem='Import_Sync'):
+    """Executa o salvamento ou substituição (upsert) dos dados no banco de dados."""
+    insert_count = 0
+    df_to_upsert['Origem_Correcao'] = origem 
+    df_to_upsert.rename(columns={'Latitude_Nova': 'Latitude_Corrigida', 'Longitude_Nova': 'Longitude_Corrigida'}, inplace=True)
+    
+    if 'Latitude_Corrigida' not in df_to_upsert.columns:
+        # Se veio do df_new_entries, as colunas já estão como 'Latitude_Corrigida'
+        pass
+
+    try:
+        with st.spinner(f"Processando a importação de {len(df_to_upsert)} linhas..."):
+            for index, row in df_to_upsert.iterrows():
+                endereco = row['Endereco_Completo_Cache']
+                lat = row['Latitude_Corrigida']
+                lon = row['Longitude_Corrigida']
+                origem_correcao = row['Origem_Correcao']
+                
+                upsert_query = f"""
+                INSERT OR REPLACE INTO {TABLE_NAME} 
+                (Endereco_Completo_Cache, Latitude_Corrigida, Longitude_Corrigida, Origem_Correcao) 
+                VALUES (?, ?, ?, ?);
+                """
+                conn.execute(upsert_query, (endereco, lat, lon, origem_correcao))
+                insert_count += 1
+            
+            conn.commit()
+            load_geoloc_cache.clear()
+            st.success(f"Sincronização concluída! **{insert_count}** entradas atualizadas/inseridas.")
+            return insert_count
+    except Exception as e:
+        st.error(f"Erro crítico ao sincronizar dados no cache. Erro: {e}")
+        return 0
+
+
+# ===============================================
+# FUNÇÃO PRINCIPAL DE PROCESSAMENTO (ATUALIZADA)
+# ===============================================
+
+def limpar_endereco(endereco):
+    if pd.isna(endereco):
+        return ""
+    endereco = str(endereco).lower().strip()
+    endereco = re.sub(r'[^\w\s,]', '', endereco) 
+    endereco = re.sub(r'\s+', ' ', endereco)
+    endereco = endereco.replace('rua', 'r').replace('avenida', 'av').replace('travessa', 'tr')
+    return endereco
+
+def get_most_common_or_empty(x):
+    x_limpo = x.dropna()
+    if x_limpo.empty:
+        return ""
+    return x_limpo.mode().iloc[0]
+
+# --- FUNÇÃO DE TRIMAGEM NO CACHE (NOVA IMPLEMENTAÇÃO DE CHAVE) ---
+def trim_cidade_cep(endereco_completo):
+    """
+    Remove os dois últimos campos separados por vírgula da string do endereço do cache, 
+    assumindo que são a Cidade e o CEP. 
+    Mantém Rua, Número, Ponto de Referência e Bairro para o match.
+    """
+    if pd.isna(endereco_completo):
+        return None
+    
+    # Padroniza para maiúsculas e remove espaços em branco extras
+    endereco = str(endereco_completo).strip().upper()
+    
+    # Divide a string pelas vírgulas
+    partes = endereco.split(',')
+    
+    # Se houver pelo menos 3 partes (o que indica que há 2 partes extras - Cidade/CEP)
+    if len(partes) >= 3:
+        # Retorna todas as partes, exceto as duas últimas ([:-2])
+        chave_trimada = ','.join(partes[:-2]).strip()
+        
+        # Limpa espaços em branco em excesso após a vírgula
+        chave_trimada = chave_trimada.replace(', ', ',').replace(' ,', ',')
+        return chave_trimada
+        
+    # Se não for possível identificar 2 partes para remover, retorna o endereço original limpo
+    return endereco.replace(', ', ',').replace(' ,', ',')
+
+
+@st.cache_data
+def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc):
+    colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
+    for col in colunas_essenciais:
+        if col not in df_entrada.columns:
+            st.error(f"Erro: A coluna essencial '{col}' não foi encontrada na sua planilha.")
+            return None, pd.DataFrame(), pd.DataFrame() # Retorna 3 valores
+        
+    df = df_entrada.copy()
+    
+    df[COLUNA_BAIRRO] = df[COLUNA_BAIRRO].astype(str).str.strip().replace('nan', '', regex=False)
+    df['City'] = df['City'].astype(str).replace('nan', '', regex=False)
+    df['Zipcode/Postal code'] = df['Zipcode/Postal code'].astype(str).replace('nan', '', regex=False)
+    
+    # CHAVE DE BUSCA NO MAPA (Destination Address + Bairro)
+    # Esta é a chave mais robusta para buscar no cache trimado
+    df['Chave_Busca_Cache'] = (
+        df[COLUNA_ENDERECO].astype(str).str.strip() + 
+        ', ' + 
+        df[COLUNA_BAIRRO].astype(str).str.strip()
+    )
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*$', '', regex=True)
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.replace(r',\s*,', ',', regex=True)
+    df['Chave_Busca_Cache'] = df['Chave_Busca_Cache'].str.upper() # Padroniza para match com o cache trimado
+    
+    
+    df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
+    df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf')).astype(float)
+    
+    # Conversão das coordenadas originais para numérico para evitar erros na comparação/processamento
+    df[COLUNA_LATITUDE] = pd.to_numeric(df[COLUNA_LATITUDE], errors='coerce')
+    df[COLUNA_LONGITUDE] = pd.to_numeric(df[COLUNA_LONGITUDE], errors='coerce')
+    
+    # [NOVO]: Salva as coordenadas originais do CSV para o relatório de status
+    df['Lat_Original_CSV'] = df[COLUNA_LATITUDE].copy()
+    df['Lon_Original_CSV'] = df[COLUNA_LONGITUDE].copy()
+
+    
+    # PASSO 1: APLICAR LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
+    if not df_cache_geoloc.empty:
+        
+        # Cria a chave de match no cache, removendo Cidade e CEP (TRIM)
+        df_cache_geoloc['Chave_Cache_DB'] = df_cache_geoloc['Endereco_Completo_Cache'].apply(trim_cidade_cep)
+        
+        df_cache_lookup = df_cache_geoloc.rename(columns={
+            'Latitude_Corrigida': 'Cache_Lat',
+            'Longitude_Corrigida': 'Cache_Lon'
+        })
+        
+        # Realiza o merge usando a nova chave (Destination Address + Bairro)
+        df = pd.merge(
+            df, 
+            df_cache_lookup[['Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon']].drop_duplicates(subset=['Chave_Cache_DB']), 
+            left_on='Chave_Busca_Cache', 
+            right_on='Chave_Cache_DB',   
+            how='left'
+        )
+        
+        # Máscara de sucesso (match no cache)
+        cache_mask = df['Cache_Lat'].notna()
+        
+        # Aplica a correção do cache (Overwrite)
+        df.loc[cache_mask, COLUNA_LATITUDE] = df.loc[cache_mask, 'Cache_Lat']
+        df.loc[cache_mask, COLUNA_LONGITUDE] = df.loc[cache_mask, 'Cache_Lon']
+        
+        # 1. IDENTIFY CORRECTED (Para o relatório)
+        df_corrected = df[cache_mask].copy()
+        df_corrected_unique = df_corrected.drop_duplicates(subset=['Chave_Busca_Cache']) # Usa a chave de busca do mapa
+        
+        # Colunas para o relatório de corrigidos
+        df_corrected_unique = df_corrected_unique[['Chave_Busca_Cache', 'Cache_Lat', 'Cache_Lon', 'Lat_Original_CSV', 'Lon_Original_CSV']]
+        df_corrected_unique.columns = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Latitude_Original', 'Longitude_Original']
+        
+        # 2. IDENTIFY UNCORRECTED (NEW) (Para o relatório)
+        df_uncorrected = df[~cache_mask].copy()
+        df_uncorrected_unique = df_uncorrected.drop_duplicates(subset=['Chave_Busca_Cache'])
+        
+        # Colunas para o relatório de não corrigidos (usa a coord. original do CSV)
+        df_uncorrected_unique = df_uncorrected_unique[['Chave_Busca_Cache', 'Lat_Original_CSV', 'Lon_Original_CSV']]
+        df_uncorrected_unique.columns = ['Endereco_Completo_Cache', 'Latitude_Original', 'Longitude_Original']
+        
+        # Limpa as colunas temporárias do DF principal
+        df = df.drop(columns=['Chave_Busca_Cache', 'Chave_Cache_DB', 'Cache_Lat', 'Cache_Lon', 'Lat_Original_CSV', 'Lon_Original_CSV'], error

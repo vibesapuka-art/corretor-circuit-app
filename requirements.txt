@@ -4,3 +4,9 @@ streamlit-aggrid
 rapidfuzz
 fastkml
 openpyxl
+pandas
+openpyxl
+streamlit-aggrid
+rapidfuzz
+fastkml
+

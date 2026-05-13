@@ -1177,11 +1177,11 @@ with tab1:
                     with st.expander("Clique para ver os endereços NOVOS que precisam de correção manual"):
                         st.dataframe(df_uncorrected_unique, use_container_width=True)
                         
-                        # --- BLOCO CORRIGIDO ---
-if not df_uncorrected_unique.empty:
-    # Garante que os dados sejam tratados como texto e remove linhas vazias
-    lista_enderecos = df_uncorrected_unique['Endereco_Completo_Cache'].dropna().astype(str).tolist()
-    addresses_to_copy = '\n'.join(lista_enderecos)
+# Correção para evitar erro de float e garantir que a coluna existe
+if 'Endereco_Completo_Cache' in df_uncorrected_unique.columns:
+    # O .dropna() remove vazios e o .astype(str) garante que não haja "floats" no meio do texto
+    lista_limpa = df_uncorrected_unique['Endereco_Completo_Cache'].dropna().astype(str).tolist()
+    addresses_to_copy = '\n'.join(lista_limpa)
 else:
     addresses_to_copy = "Nenhum endereço pendente. Tudo corrigido!"
 

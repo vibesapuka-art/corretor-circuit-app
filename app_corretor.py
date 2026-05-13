@@ -1177,14 +1177,16 @@ with tab1:
                     with st.expander("Clique para ver os endereços NOVOS que precisam de correção manual"):
                         st.dataframe(df_uncorrected_unique, use_container_width=True)
                         
-                        # Área de texto para cópia rápida
-                        addresses_to_copy = '\n'.join(df_uncorrected_unique['Endereco_Completo_Cache'].astype(str).tolist())
-                        st.text_area(
-                            "Copie os endereços para corrigir no cache (Aba 💾 Gerenciar Cache):",
-                            addresses_to_copy,
-                            height=150,
-                            key="copy_uncorrected_list"
-                        )
+                        # --- BLOCO CORRIGIDO ---
+if not df_uncorrected_unique.empty:
+    # Garante que os dados sejam tratados como texto e remove linhas vazias
+    lista_enderecos = df_uncorrected_unique['Endereco_Completo_Cache'].dropna().astype(str).tolist()
+    addresses_to_copy = '\n'.join(lista_enderecos)
+else:
+    addresses_to_copy = "Nenhum endereço pendente. Tudo corrigido!"
+
+# Exibe na tela com segurança
+st.text_area("Copie os endereços abaixo para o Google Maps:", value=addresses_to_copy, height=200)
                 
                 st.markdown("---")
                 # FIM DO NOVO RELATÓRIO

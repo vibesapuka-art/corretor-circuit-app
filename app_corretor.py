@@ -153,7 +153,7 @@ def save_single_entry_to_db(conn, endereco, lat, lon, origem='Manual'):
     st.rerun()
 
 # ===============================================
-# KML / KMZ
+# KML / KMZ / XML
 # ===============================================
 
 @st.cache_data
@@ -168,23 +168,27 @@ def parse_kml_data(uploaded_file):
         else:
             k.from_string(file_bytes.decode('utf-8'))
     except Exception as e:
-        st.error(f"Erro KML: {e}")
+        st.error(f"Erro no processamento: {e}")
         return pd.DataFrame()
 
     data = []
-    def extract_placemarks(features):
+    def recursive_extract(features):
         for f in features:
             if hasattr(f, 'features'):
-                extract_placemarks(f.features())
+                recursive_extract(f.features())
             if isinstance(f, kml.Placemark) and f.geometry:
                 coords = list(f.geometry.coords)[0]
-                data.append({'Endereco_Completo_Cache': f.name, 'Longitude_Corrigida': coords[0], 'Latitude_Corrigida': coords[1]})
-
-    extract_placemarks(k.features())
+                data.append({
+                    'Endereco_Completo_Cache': f.name,
+                    'Latitude_Corrigida': coords[1],
+                    'Longitude_Corrigida': coords[0]
+                })
+    
+    recursive_extract(k.features())
     return pd.DataFrame(data)
 
 # ===============================================
-# GOOGLE MAPS CSV REPAIR (FIXED)
+# GOOGLE MAPS CSV REPAIR
 # ===============================================
 
 @st.cache_data
@@ -208,7 +212,7 @@ def convert_google_maps_csv(uploaded_file):
         if match:
             wkt, _, rest = match.groups()
             parts = [p.strip() for p in rest.split(',')]
-            if len(parts) > 10: # Se houver excesso de vírgulas no endereço
+            if len(parts) > 10:
                 prefix = parts[:4]
                 suffix = parts[-5:]
                 middle = '"' + ', '.join(parts[4:-5]).replace('"', '') + '"'
@@ -221,20 +225,21 @@ def convert_google_maps_csv(uploaded_file):
 
     df = pd.read_csv(io.StringIO('\n'.join(reparsed_data)))
     
-    # Normalização dos nomes para o Cache
-    df['Endereco_Completo_Cache'] = df[GMAPS_COL_ADDRESS].astype(str).str.strip()
-    # Adiciona bairro e cidade se existirem para tornar a chave única
-    if GMAPS_COL_BAIRRO in df.columns:
-        df['Endereco_Completo_Cache'] += ", " + df[GMAPS_COL_BAIRRO].astype(str)
-    
-    df['Latitude_Corrigida'] = df[GMAPS_COL_LAT]
-    df['Longitude_Corrigida'] = df[GMAPS_COL_LON]
+    def build_full_address(row):
+        addr = str(row[GMAPS_COL_ADDRESS]).strip()
+        bairro = str(row.get(GMAPS_COL_BAIRRO, "")).strip()
+        city = str(row.get(GMAPS_COL_CITY, "")).strip()
+        if bairro: addr += f", {bairro}"
+        if city and city not in addr: addr += f", {city}"
+        return addr
+
+    df['Endereco_Completo_Cache'] = df.apply(build_full_address, axis=1)
+    df['Latitude_Corrigida'] = pd.to_numeric(df[GMAPS_COL_LAT], errors='coerce')
+    df['Longitude_Corrigida'] = pd.to_numeric(df[GMAPS_COL_LON], errors='coerce')
     df['Origem_Correcao'] = 'GoogleMaps_Import'
     
-    return df[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Origem_Correcao']]
+    return df[['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Corrigida', 'Origem_Correcao']].dropna()
 
-# --- Exemplo de inicialização simples ---
+# --- Inicialização ---
 conn = get_db_connection()
 create_table_if_not_exists(conn)
-st.title("Circuit Flow - Sistema de Geocodificação")
-st.write("Banco de dados pronto para uso.")

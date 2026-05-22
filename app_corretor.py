@@ -313,10 +313,10 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (IMPRESSÃO INTELIGENTE) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (MAPEAMENTO TOTALMENTE AUTOMÁTICO) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
-    st.markdown("Insira aqui qualquer formato de planilha que saiu do Circuit.")
+    st.markdown("Insira aqui o arquivo exportado de dentro do Circuit.")
     
     uploaded_file_pos = st.file_uploader("Arraste a planilha que saiu do Circuit:", type=['csv', 'xlsx'], key="file_pos")
     
@@ -327,76 +327,74 @@ with tab2:
             else:
                 df_pos = pd.read_excel(uploaded_file_pos, sheet_name=0)
             
-            # --- LOCALIZADOR DE COLUNAS AUTOMÁTICO (Fuzzy Mapeamento) ---
-            # Encontra a melhor coluna mapeando por palavras-chave independentemente da posição
+            # --- DETECTOR INTELIGENTE DE COLUNAS ---
             col_id = None
             col_addr = None
             col_note = None
             
             for col in df_pos.columns:
-                col_lower = str(col).lower().strip()
-                if col_lower in ['order id', 'order_id', 'id', 'order id', '#']:
+                col_clean = str(col).strip().lower()
+                # Captura o símbolo '#' ou palavras que representam o ID
+                if col_clean in ['#', 'order id', 'order_id', 'id', 'sequencia', 'sequência']:
                     col_id = col
-                elif col_lower in ['address', 'destination address', 'endereço', 'endereco', 'destinatário']:
+                elif col_clean in ['address', 'destination address', 'endereço', 'endereco', 'rua']:
                     col_addr = col
-                elif col_lower in ['notes', 'notes_1', 'nota', 'notas', 'observações']:
+                elif col_clean in ['notes', 'notes_1', 'nota', 'notas', 'observações', 'obs']:
                     col_note = col
 
-            # Fallbacks caso venha com nomes completamente fora do padrão (Mapeia pela posição aproximada)
+            # Fallbacks automáticos baseados estritamente na ordem física das colunas se os nomes falharem
             if not col_id and len(df_pos.columns) > 0: col_id = df_pos.columns[0]
             if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1]
             if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2]
 
             if col_id and col_addr:
-                # Garante que Notas exista como string limpa para não quebrar a conferência
+                # Normaliza os dados para string para evitar erros de leitura com valores nulos
+                df_pos[col_id] = df_pos[col_id].fillna("").astype(str)
+                df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str)
                 if col_note:
                     df_pos[col_note] = df_pos[col_note].fillna("").astype(str)
                 else:
                     df_pos['Notes'] = ""
                     col_note = 'Notes'
-                
-                df_pos[col_id] = df_pos[col_id].fillna("").astype(str)
-                df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str)
 
-                # Regra Inteligente: Caça o asterisco (*) em qualquer parte dos IDs ou notas
-                df_pos['Possui_Volumoso'] = df_pos[col_id].str.contains(r'\*', regex=True) | df_pos[col_note].str.contains(r'\*', regex=True)
+                # Nova regra de limpeza: remove espaços extras e valida se existe '*' em qualquer lugar
+                df_pos['Possui_Volumoso'] = df_pos[col_id].str.replace(" ", "").str.contains(r'\*', regex=True) | df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
                 
-                # Monta a estrutura final padronizada para impressão
-                colunas_saida = [col_id, col_addr, col_note]
-                df_geral_entrega = df_pos[colunas_saida].copy()
-                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][colunas_saida].copy()
-                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][colunas_saida].copy()
+                # Formata a visualização final com títulos limpos e organizados
+                df_geral_entrega = df_pos[[col_id, col_addr, col_note]].copy()
+                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][[col_id, col_addr, col_note]].copy()
+                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][[col_id, col_addr, col_note]].copy()
                 
-                st.success(f"Mapeamento Automático Concluído! Colunas Identificadas -> ID: [{col_id}] | Endereço: [{col_addr}] | Notas: [{col_note}]")
+                st.success(f"🤖 Colunas Identificadas automaticamente: Código/ID -> [{col_id}] | Endereço -> [{col_addr}] | Notas -> [{col_note}]")
                 
-                # Exibição dos Relatórios e downloads
+                # Geração dos Painéis lado a lado
                 c1, c2, c3 = st.columns(3)
                 
                 with c1:
-                    st.markdown("#### 📑 1. Tudo Junto")
-                    st.caption("Ordem exata do Circuit para conferência geral.")
+                    st.markdown("#### 📑 1. Tudo Junto (Romaneio)")
+                    st.caption("Lista Geral unificada na ordem de entrega calculada.")
                     buf_g = io.BytesIO()
                     df_geral_entrega.to_excel(buf_g, index=False)
-                    st.download_button("🖨️ Imprimir Geral", buf_g.getvalue(), "Conferenca_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
+                    st.download_button("🖨️ Baixar Romaneio Geral", buf_g.getvalue(), "Romaneio_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_geral_entrega, use_container_width=True)
                     
                 with c2:
                     st.markdown("#### ⚠️ 2. Apenas Volumosos")
-                    st.caption("Lista para o pátio separar cargas com (*).")
+                    st.caption("Filtro exclusivo com os pacotes marcados com (*).")
                     buf_v = io.BytesIO()
                     df_volumosos_print.to_excel(buf_v, index=False)
-                    st.download_button("🖨️ Imprimir Volumosos", buf_v.getvalue(), "Triagem_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
+                    st.download_button("🖨️ Baixar Lista Volumosos", buf_v.getvalue(), "Separacao_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_volumosos_print, use_container_width=True)
                     
                 with c3:
                     st.markdown("#### 📦 3. Pacotes Comuns")
-                    st.caption("Lista limpa para a esteira padrão.")
+                    st.caption("Filtro contendo apenas mercadorias comuns.")
                     buf_c = io.BytesIO()
                     df_comuns_print.to_excel(buf_c, index=False)
-                    st.download_button("🖨️ Imprimir Comuns", buf_c.getvalue(), "Triagem_COMUNS.xlsx", EXCEL_MIME_TYPE)
+                    st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_comuns_print, use_container_width=True)
             else:
-                st.error("Não foi possível mapear as colunas básicas de ID e Endereço desse arquivo.")
+                st.error("Não foi possível processar a estrutura de colunas deste arquivo.")
                     
         except Exception as e:
-            st.error(f"Erro ao processar arquivo: {e}")
+            st.error(f"Erro no processamento da rota: {e}")

@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CSS para garantir alinhamento à esquerda em TEXT AREAS e Checkboxes ---
+# --- CSS para garantir alinhamento à esquerda ---
 st.markdown("""
 <style>
 .stTextArea [data-baseweb="base-input"], 
@@ -44,9 +44,10 @@ COLUNA_LATITUDE = 'Latitude'
 COLUNA_LONGITUDE = 'Longitude'
 COLUNA_BAIRRO = 'Bairro' 
 
-# Colunas esperadas no arquivo de Pós-Roteirização (Saída do Circuit)
+# Colunas padrão que o Circuit devolve no arquivo de exportação (Pós-Roteirização)
 COLUNA_ADDRESS_CIRCUIT = 'address' 
 COLUNA_NOTES_CIRCUIT = 'notes'
+COLUNA_ID_CIRCUIT = 'order_id'
 
 # --- Configurações de MIME Type ---
 EXCEL_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -59,7 +60,6 @@ CACHE_COLUMNS = ['Endereco_Completo_Cache', 'Latitude_Corrigida', 'Longitude_Cor
 # ===============================================
 # FUNÇÕES DE BANCO DE DADOS (SQLite)
 # ===============================================
-
 @st.cache_resource
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False, timeout=10)
@@ -90,7 +90,7 @@ def load_geoloc_cache(conn):
         return pd.DataFrame(columns=CACHE_COLUMNS)
 
 # ===============================================
-# FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO (CORREÇÃO/AGRUPAMENTO)
+# FUNÇÕES DE PRÉ-ROTEIRIZAÇÃO
 # ===============================================
 def limpar_endereco(endereco):
     if pd.isna(endereco):
@@ -128,7 +128,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df['Sequence_Num'] = df[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
     df['Sequence_Num'] = pd.to_numeric(df['Sequence_Num'], errors='coerce').fillna(float('inf'))
 
-    # PASSO 1: LOOKUP NO CACHE DE GEOLOCALIZAÇÃO
     if not df_cache_geoloc.empty:
         df_cache_lookup = df_cache_geoloc.rename(columns={
             'Endereco_Completo_Cache': 'Chave_Busca_Cache', 
@@ -142,7 +141,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         corrected_addresses = df.loc[cache_mask, 'Chave_Busca_Cache'].unique().tolist()
         df = df.drop(columns=['Cache_Lat', 'Cache_Lon'], errors='ignore')
     
-    # PASSO 2: FUZZY MATCHING E AGRUPAMENTO
     df['Endereco_Limpo'] = df[COLUNA_ENDERECO].apply(limpar_endereco)
     enderecos_unicos = df['Endereco_Limpo'].unique()
     mapa_correcao = {}
@@ -159,7 +157,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
                 
     df['Endereco_Corrigido'] = df['Endereco_Limpo'].map(mapa_correcao)
 
-    # Agrupamento estruturado mantendo as sequências ordenadas de forma inteligível
     df_agrupado = df.groupby(['Endereco_Corrigido', 'City', COLUNA_BAIRRO]).agg(
         Sequences_Agrupadas=(COLUNA_SEQUENCE, lambda x: ','.join(map(str, sorted(x, key=lambda y: int(re.sub(r'\*', '', str(y))) if re.sub(r'\*', '', str(y)).isdigit() else float('inf'))))), 
         Total_Pacotes=('Sequence_Num', lambda x: (x != float('inf')).sum()), 
@@ -227,9 +224,9 @@ def split_dataframe_for_drivers(df_circuit, num_motoristas):
 conn = get_db_connection()
 create_table_if_not_exists(conn)
 
-st.title("🗺️ Flow Completo Circuit (Pré, Pós e Cache)")
+st.title("🗺️ Flow Completo Circuit")
 
-tab1, tab_split, tab2, tab3 = st.tabs(["🚀 Pré-Roteirização (Importação)", "✂️ Split Route (Dividir)", "📋 Pós-Roteirização (Impressão/Cópia)", "💾 Gerenciar Cache de Geolocalização"])
+tab1, tab_split, tab2, tab3 = st.tabs(["🚀 1. Pré-Roteirização", "✂️ 2. Split Route", "📋 3. Pós-Roteirização (Impressão)", "💾 4. Cache"])
 
 if 'df_original' not in st.session_state:
     st.session_state['df_original'] = None
@@ -240,8 +237,8 @@ if 'df_circuit_agrupado_pre' not in st.session_state:
 
 # --- ABA 1: PRÉ-ROTEIRIZAÇÃO ---
 with tab1:
-    st.header("1. Gerar Arquivo para Importar no Circuit")
-    uploaded_file_pre = st.file_uploader("Arraste e solte o arquivo original (CSV/Excel) aqui:", type=['csv', 'xlsx'], key="file_pre")
+    st.header("Passo 1: Enviar Planilha e Marcar Volumosos")
+    uploaded_file_pre = st.file_uploader("Arraste o arquivo original (CSV/Excel):", type=['csv', 'xlsx'], key="file_pre")
 
     if uploaded_file_pre is not None:
         try:
@@ -250,30 +247,17 @@ with tab1:
             else:
                 df_input_pre = pd.read_excel(uploaded_file_pre, sheet_name=0)
             
-            colunas_essenciais = [COLUNA_ENDERECO, COLUNA_SEQUENCE, COLUNA_LATITUDE, COLUNA_LONGITUDE, COLUNA_BAIRRO, 'City', 'Zipcode/Postal code']
-            for col in colunas_essenciais:
-                 if col not in df_input_pre.columns:
-                     raise KeyError(f"A coluna '{col}' está faltando na sua planilha.")
-            
-            if st.session_state.get('last_uploaded_name') != uploaded_file_pre.name:
-                 st.session_state['volumoso_ids'] = set()
-                 st.session_state['last_uploaded_name'] = uploaded_file_pre.name
-                 st.session_state['df_circuit_agrupado_pre'] = None
-
             st.session_state['df_original'] = df_input_pre.copy()
-            st.success(f"Arquivo '{uploaded_file_pre.name}' carregado! Total de **{len(df_input_pre)}** registros.")
             
         except Exception as e:
-            st.error(f"Erro ao carregar arquivo: {e}")
+            st.error(f"Erro ao carregar: {e}")
 
     if st.session_state['df_original'] is not None:
-        st.markdown("---")
-        st.subheader("1.2 Marcar Pacotes Volumosos (Volumosos = *)")
+        st.subheader("Selecione os IDs Volumosos para marcar com (*)")
         
         df_temp = st.session_state['df_original'].copy()
         df_temp['Order_Num'] = df_temp[COLUNA_SEQUENCE].astype(str).str.replace('*', '', regex=False)
         df_temp['Order_Num'] = pd.to_numeric(df_temp['Order_Num'], errors='coerce')
-        
         df_ordens_unicas = df_temp.drop_duplicates(subset=[COLUNA_SEQUENCE]).sort_values(by='Order_Num')
         ordens_originais_sorted = df_ordens_unicas[COLUNA_SEQUENCE].astype(str).tolist()
         
@@ -284,10 +268,9 @@ with tab1:
                 st.session_state['volumoso_ids'].remove(order_id)
 
         NUM_COLS = 5
-        total_items = len(ordens_originais_sorted)
-        chunked_list = [ordens_originais_sorted[i:i + NUM_COLS] for i in range(0, total_items, NUM_COLS)]
+        chunked_list = [ordens_originais_sorted[i:i + NUM_COLS] for i in range(0, len(ordens_originais_sorted), NUM_COLS)]
 
-        with st.container(height=250):
+        with st.container(height=200):
             for row_chunk in chunked_list:
                 cols = st.columns(len(row_chunk)) 
                 for col_index, order_id in enumerate(row_chunk):
@@ -295,102 +278,108 @@ with tab1:
                         is_checked = order_id in st.session_state['volumoso_ids']
                         st.checkbox(str(order_id), value=is_checked, key=f"vol_{order_id}", on_change=update_volumoso_ids, args=(order_id, not is_checked))
 
-        st.info(f"**{len(st.session_state['volumoso_ids'])}** pacotes marcados como volumosos.")
-        
-        st.markdown("---")
-        st.subheader("1.3 Configurar e Processar")
-        
-        limite_similaridade_ajustado = st.slider('Ajuste a Precisão do Corretor (Fuzzy Matching):', min_value=80, max_value=100, value=100)
-        
-        if st.button("🚀 Iniciar Corretor e Agrupamento", key="btn_pre_final"):
+        if st.button("🚀 Gerar Arquivo Único Para o Circuit", key="btn_pre_final"):
             df_para_processar = st.session_state['df_original'].copy()
             df_para_processar[COLUNA_SEQUENCE] = df_para_processar[COLUNA_SEQUENCE].astype(str)
             
-            # Aplica o asterisco apenas nos itens selecionados mantendo toda a estrutura intacta
             for id_volumoso in st.session_state['volumoso_ids']:
                 str_id_volumoso = str(id_volumoso)
                 df_para_processar.loc[df_para_processar[COLUNA_SEQUENCE] == str_id_volumoso, COLUNA_SEQUENCE] = str_id_volumoso + '*'
 
             df_cache = load_geoloc_cache(conn)
-            
-            with st.spinner('Processando dados...'):
-                df_circuit, corrected_addresses = processar_e_corrigir_dados(df_para_processar, limite_similaridade_ajustado, df_cache)
+            df_circuit, _ = processar_e_corrigir_dados(df_para_processar, 100, df_cache)
             
             if df_circuit is not None:
                 st.session_state['df_circuit_agrupado_pre'] = df_circuit
-                st.success("Processamento concluído com sucesso!")
-                
-                st.subheader("Visualização da Planilha Geral para Roteirização")
                 df_visualizacao = df_circuit.drop(columns=['Sequence_Base'], errors='ignore')
                 st.dataframe(df_visualizacao, use_container_width=True)
                 
-                # --- PROCESSAMENTO EXCLUSIVO PARA ARQUIVOS DE SEPARAÇÃO ---
-                # 1. Filtra a planilha final buscando onde as sequências contém asterisco
-                df_volumosos_exclusivos = df_visualizacao[df_visualizacao['Order ID'].astype(str).str.contains(r'\*', regex=True)].copy()
-                # 2. Filtra a planilha final buscando onde as sequências NÃO contém asterisco
-                df_comuns_exclusivos = df_visualizacao[~df_visualizacao['Order ID'].astype(str).str.contains(r'\*', regex=True)].copy()
-                
-                st.markdown("### 📥 Arquivos Separados para a Separação Física")
-                col_btn1, col_btn2 = st.columns(2)
-                
-                # Botão 1: Planilha Apenas com Mercadorias Comuns
-                with col_btn1:
-                    buffer_comuns = io.BytesIO()
-                    with pd.ExcelWriter(buffer_comuns, engine='openpyxl') as writer:
-                        df_comuns_exclusivos.to_excel(writer, index=False, sheet_name='Pacotes_Comuns')
-                    buffer_comuns.seek(0)
-                    st.download_button(
-                        label="📦 Baixar Lista: PACOTES COMUNS",
-                        data=buffer_comuns,
-                        file_name="Separacao_PACOTES_COMUNS.xlsx",
-                        mime=EXCEL_MIME_TYPE,
-                        key="download_comuns"
-                    )
-                    st.caption(f"Contém {len(df_comuns_exclusivos)} paradas sem volumosos.")
-
-                # Botão 2: Planilha Apenas com Volumosos
-                with col_btn2:
-                    buffer_volumosos = io.BytesIO()
-                    with pd.ExcelWriter(buffer_volumosos, engine='openpyxl') as writer:
-                        df_volumosos_exclusivos.to_excel(writer, index=False, sheet_name='Volumosos')
-                    buffer_volumosos.seek(0)
-                    st.download_button(
-                        label="⚠️ Baixar Lista: APENAS VOLUMOSOS (*)",
-                        data=buffer_volumosos,
-                        file_name="Separacao_APENAS_VOLUMOSOS.xlsx",
-                        mime=EXCEL_MIME_TYPE,
-                        key="download_volumosos"
-                    )
-                    st.caption(f"Contém {len(df_volumosos_exclusivos)} paradas que possuem volumosos.")
+                buffer_circuit = io.BytesIO()
+                with pd.ExcelWriter(buffer_circuit, engine='openpyxl') as writer:
+                    df_visualizacao.to_excel(writer, index=False, sheet_name='Importar_No_Circuit')
+                buffer_circuit.seek(0)
+                st.download_button(
+                    label="📥 Baixar PLANILHA COMPLETA (Jogar no Circuit)",
+                    data=buffer_circuit,
+                    file_name="Planilha_Para_O_Circuit.xlsx",
+                    mime=EXCEL_MIME_TYPE
+                )
 
 # --- ABA 2: SPLIT ROUTE ---
 with tab_split:
-    st.header("✂️ Dividir Rota PRÉ-Roteirização (Downloads Individuais)")
+    st.header("✂️ Dividir Rota Antes de Jogar no Circuit")
     df_rota_para_split = st.session_state.get('df_circuit_agrupado_pre')
-    
-    if df_rota_para_split is not None and not df_rota_para_split.empty:
-        st.info(f"Rota carregada: **{len(df_rota_para_split)} paradas** prontas.")
-        num_motoristas = st.slider('Número de Motoristas:', min_value=2, max_value=10, value=2, key="num_motoristas_split_pre")
-        
-        if st.button(f"➡️ Dividir Rotas", key="btn_split_route_pre"):
+    if df_rota_para_split is not None:
+        num_motoristas = st.slider('Número de Motoristas:', 2, 10, 2)
+        if st.button("➡️ Dividir"):
             rotas_divididas = split_dataframe_for_drivers(df_rota_para_split, num_motoristas)
-            
             for i, (nome_rota, df_rota) in enumerate(rotas_divididas.items()):
-                st.markdown("___")
                 st.subheader(nome_rota)
                 st.dataframe(df_rota, use_container_width=True)
-                
                 buffer_individual = io.BytesIO()
                 with pd.ExcelWriter(buffer_individual, engine='openpyxl') as writer:
-                    df_rota.to_excel(writer, index=False, sheet_name='Rota_Motorista')
+                    df_rota.to_excel(writer, index=False, sheet_name='Rota')
                 buffer_individual.seek(0)
+                st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
+
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (IMPRESSÃO / SEPARAÇÃO DE VOLUMOSOS) ---
+with tab2:
+    st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
+    st.markdown("Insira aqui o arquivo **exportado de dentro do Circuit** (após ele já ter calculado a ordem perfeita de entrega).")
+    
+    uploaded_file_pos = st.file_uploader("Arraste a planilha que saiu do Circuit:", type=['csv', 'xlsx'], key="file_pos")
+    
+    if uploaded_file_pos is not None:
+        try:
+            if uploaded_file_pos.name.endswith('.csv'):
+                df_pos = pd.read_csv(uploaded_file_pos)
+            else:
+                df_pos = pd.read_excel(uploaded_file_pos, sheet_name=0)
+            
+            # Identificação flexível das colunas geradas pelo Circuit
+            col_id = next((c for c in df_pos.columns if c.lower() in [COLUNA_ID_CIRCUIT, 'order id', 'order_id']), None)
+            col_addr = next((c for c in df_pos.columns if c.lower() in [COLUNA_ADDRESS_CIRCUIT, 'address']), None)
+            col_note = next((c for c in df_pos.columns if c.lower() in [COLUNA_NOTES_CIRCUIT, 'notes']), None)
+            
+            if not col_id or not col_addr:
+                st.error("Não encontramos as colunas de ID ou Endereço padrão do Circuit nesta planilha.")
+            else:
+                # Criando relatórios baseados na presença do asterisco (*) que foi injetado na Aba 1
+                df_pos['Possui_Volumoso'] = df_pos[col_id].astype(str).str.contains(r'\*', regex=True) | df_pos[col_note].astype(str).str.contains(r'\*', regex=True)
                 
-                st.download_button(
-                    label=f"⬇️ Baixar Planilha - {nome_rota}",
-                    data=buffer_individual,
-                    file_name=f"Circuit_Rota_{i+1}.xlsx",
-                    mime=EXCEL_MIME_TYPE,
-                    key=f"dl_moto_{i}"
-                )
-    else:
-        st.warning("Gere e processe a rota na primeira aba antes de efetuar a divisão.")
+                # Gerando os 3 DataFrames específicos para o galpão
+                df_geral_entrega = df_pos[[col_id, col_addr, col_note]].copy()
+                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][[col_id, col_addr, col_note]].copy()
+                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][[col_id, col_addr, col_note]].copy()
+                
+                st.success("Planilha da rota processada! Pronta para separação física e impressão.")
+                
+                # Layout de Botões organizados lado a lado
+                c1, c2, c3 = st.columns(3)
+                
+                with c1:
+                    st.markdown("#### 📑 1. Tudo Junto")
+                    st.caption("Ordem exata de entrega para conferência do romaneio geral.")
+                    buf_g = io.BytesIO()
+                    df_geral_entrega.to_excel(buf_g, index=False)
+                    st.download_button("🖨️ Imprimir/Baixar Geral", buf_g.getvalue(), "Conferenca_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
+                    st.dataframe(df_geral_entrega, use_container_width=True)
+                    
+                with c2:
+                    st.markdown("#### ⚠️ 2. Apenas Volumosos")
+                    st.caption("Entregue essa lista para separar os pacotes marcados com (*).")
+                    buf_v = io.BytesIO()
+                    df_volumosos_print.to_excel(buf_v, index=False)
+                    st.download_button("🖨️ Imprimir/Baixar Volumosos", buf_v.getvalue(), "Triagem_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
+                    st.dataframe(df_volumosos_print, use_container_width=True)
+                    
+                with c3:
+                    st.markdown("#### 📦 3. Pacotes Comuns")
+                    st.caption("Lista limpa, livre de cargas pesadas ou espaçosas.")
+                    buf_c = io.BytesIO()
+                    df_comuns_print.to_excel(buf_c, index=False)
+                    st.download_button("🖨️ Imprimir/Baixar Comuns", buf_c.getvalue(), "Triagem_COMUNS.xlsx", EXCEL_MIME_TYPE)
+                    st.dataframe(df_comuns_print, use_container_width=True)
+                    
+        except Exception as e:
+            st.error(f"Erro ao processar arquivo de pós-roteirização: {e}")

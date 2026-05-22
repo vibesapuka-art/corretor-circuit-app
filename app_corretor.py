@@ -280,16 +280,14 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (COM SELEÇÃO DE TABELA DINÂMICA) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (VISTA APENAS DAS NOTES + TEXTO COPIÁVEL WHATSAPP) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
     
-    # 1. Upload do Arquivo do Circuit
     uploaded_file_pos = st.file_uploader("Arraste a planilha/arquivo do Circuit aqui:", type=['csv', 'xlsx'], key="file_pos")
     
     if uploaded_file_pos is not None:
         try:
-            # Identifica todas as abas/tabelas se for um arquivo Excel
             abas_disponiveis = ["Primeira Tabela / Padrão"]
             is_excel = uploaded_file_pos.name.endswith('.xlsx')
             
@@ -298,75 +296,88 @@ with tab2:
                 if len(xl.sheet_names) > 1:
                     abas_disponiveis = xl.sheet_names
 
-            # 2. SELETOR DE TABELA DINÂMICA (Opção para escolher qual Table pesquisar)
             st.markdown("### 🔍 Configuração da Aba do Arquivo")
             tabela_selecionada = st.selectbox(
                 "Selecione qual Tabela/Aba contém os dados de entrega (onde fica a coluna Notes na coluna C):",
                 options=abas_disponiveis,
-                index=1 if len(abas_disponiveis) > 1 else 0 # Deixa pré-selecionada a Table 2 se houver
+                index=1 if len(abas_disponiveis) > 1 else 0
             )
             
-            # Carrega a tabela escolhida pelo usuário
             if is_excel:
                 sheet_to_load = tabela_selecionada if tabela_selecionada != "Primeira Tabela / Padrão" else 0
                 df_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_to_load)
             else:
                 df_pos = pd.read_csv(uploaded_file_pos)
             
-            # --- PROCESSAMENTO SEGURO DA COLUNA C ('Notes') ---
             col_addr = next((c for c in df_pos.columns if str(c).strip().lower() == 'address'), None)
             col_note = next((c for c in df_pos.columns if str(c).strip().lower() == 'notes'), None)
 
-            # Fallback robusto caso as colunas venham sem nome na tabela selecionada
-            if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1] # Coluna B
-            if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2] # Coluna C
+            if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1]
+            if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2]
 
             if col_addr and col_note:
                 df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()
                 df_pos[col_note] = df_pos[col_note].fillna("").astype(str).str.strip()
                 
-                # Gera a numeração sequencial correta baseada na ordem das linhas da tabela lida
-                df_pos['Posicao_Entrega'] = range(1, len(df_pos) + 1)
-                
-                # Varre a coluna C procurando o asterisco (*)
+                # Varre se possui asterisco removendo espaços
                 df_pos['Possui_Volumoso'] = df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
                 
-                # Padroniza nomes para os relatórios finais
-                df_pos = df_pos.rename(columns={'Posicao_Entrega': 'Nº Entrega', col_addr: 'Endereço', col_note: 'Notas/Identificadores'})
-                colunas_saida = ['Nº Entrega', 'Endereço', 'Notas/Identificadores']
+                # Separa os dataframes originais completos (para a exportação em Excel)
+                df_geral_excel = df_pos[[col_addr, col_note]].copy()
+                df_volumosos_excel = df_pos[df_pos['Possui_Volumoso'] == True][[col_addr, col_note]].copy()
+                df_comuns_excel = df_pos[df_pos['Possui_Volumoso'] == False][[col_addr, col_note]].copy()
                 
-                df_geral_entrega = df_pos[colunas_saida].copy()
-                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][colunas_saida].copy()
-                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][colunas_saida].copy()
+                # --- VISUALIZAÇÃO EXCLUSIVA DA COLUNA NOTES SOLICITADA ---
+                df_geral_view = df_pos[[col_note]].rename(columns={col_note: 'Notas (Lista Geral)'}).reset_index(drop=True)
+                df_volumosos_view = df_pos[df_pos['Possui_Volumoso'] == True][[col_note]].rename(columns={col_note: 'Notas (Volumosos)'}).reset_index(drop=True)
+                df_comuns_view = df_pos[df_pos['Possui_Volumoso'] == False][[col_note]].rename(columns={col_note: 'Notas (Comuns)'}).reset_index(drop=True)
                 
-                st.success(f"⚡ Sucesso! Lendo dados da [{tabela_selecionada}]. Total de {len(df_pos)} paradas.")
+                st.success(f"⚡ Sucesso! Lendo dados da [{tabela_selecionada}].")
                 
-                # Renderização das Tabelas Lado a Lado
+                # Geração das colunas na tela
                 c1, c2, c3 = st.columns(3)
                 
                 with c1:
                     st.markdown("#### 📑 1. Tudo Junto (Romaneio)")
-                    st.caption("Ordem unificada gerada pelo Circuit.")
                     buf_g = io.BytesIO()
-                    df_geral_entrega.to_excel(buf_g, index=False)
-                    st.download_button("🖨️ Baixar Romaneio Geral", buf_g.getvalue(), "Romaneio_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
-                    st.dataframe(df_geral_entrega, use_container_width=True)
+                    df_geral_excel.to_excel(buf_g, index=False)
+                    st.download_button("🖨️ Baixar Romaneio Geral", buf_g.getvalue(), "Romaneio_GERAL.xlsx", EXCEL_MIME_TYPE)
+                    st.dataframe(df_geral_view, use_container_width=True, hide_index=True)
                     
                 with c2:
                     st.markdown("#### ⚠️ 2. Apenas Volumosos")
-                    st.caption("Filtro para separação de cargas com (*).")
                     buf_v = io.BytesIO()
-                    df_volumosos_print.to_excel(buf_v, index=False)
+                    df_volumosos_excel.to_excel(buf_v, index=False)
                     st.download_button("🖨️ Baixar Lista Volumosos", buf_v.getvalue(), "Separacao_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
-                    st.dataframe(df_volumosos_print, use_container_width=True)
+                    st.dataframe(df_volumosos_view, use_container_width=True, hide_index=True)
                     
                 with c3:
                     st.markdown("#### 📦 3. Pacotes Comuns")
-                    st.caption("Lista para esteira padrão sem volumosos.")
                     buf_c = io.BytesIO()
-                    df_comuns_print.to_excel(buf_c, index=False)
+                    df_comuns_excel.to_excel(buf_c, index=False)
                     st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
-                    st.dataframe(df_comuns_print, use_container_width=True)
+                    st.dataframe(df_comuns_view, use_container_width=True, hide_index=True)
+                
+                # --- BOX COPIÁVEL PARA WHATSAPP ---
+                st.markdown("---")
+                st.markdown("### 💬 Copiar Lista Geral para o WhatsApp")
+                st.caption("Clique no botão no canto superior direito da caixa abaixo para copiar toda a lista limpa de uma vez.")
+                
+                # Transforma a coluna de notas em texto linha por linha para colagem limpa
+                linhas_whatsapp = []
+                for idx, nota in enumerate(df_pos[col_note].tolist(), 1):
+                    # Remove o ponto e vírgula final se houver na nota do Circuit para o texto ficar mais limpo
+                    nota_limpa = str(nota).rstrip(';')
+                    linhas_whatsapp.append(f"{idx}. {nota_limpa}")
+                
+                texto_whatsapp_completo = "\n".join(linhas_whatsapp)
+                
+                st.text_area(
+                    label="Texto formatado pronto para envio:",
+                    value=texto_whatsapp_completo,
+                    height=250
+                )
+                
             else:
                 st.error("Não encontramos colunas válidas nesta Tabela. Certifique-se de escolher a aba correta.")
                     

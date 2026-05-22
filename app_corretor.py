@@ -280,7 +280,7 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (VISTA APENAS DAS NOTES + TEXTO COPIÁVEL WHATSAPP) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (LIMPA E COPIÁVEL DE FORMA EXATA) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
     
@@ -319,15 +319,18 @@ with tab2:
                 df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()
                 df_pos[col_note] = df_pos[col_note].fillna("").astype(str).str.strip()
                 
-                # Varre se possui asterisco removendo espaços
+                # Trata as strings de notas limpando espaços duplicados e pontos e vírgulas finais
+                df_pos[col_note] = df_pos[col_note].apply(lambda x: re.sub(r';\s*$', '', str(x)).strip())
+                
+                # Varre se possui asterisco para separar volumosos
                 df_pos['Possui_Volumoso'] = df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
                 
-                # Separa os dataframes originais completos (para a exportação em Excel)
+                # Separa os dataframes originais completos (para a exportação em Excel com Endereço)
                 df_geral_excel = df_pos[[col_addr, col_note]].copy()
                 df_volumosos_excel = df_pos[df_pos['Possui_Volumoso'] == True][[col_addr, col_note]].copy()
                 df_comuns_excel = df_pos[df_pos['Possui_Volumoso'] == False][[col_addr, col_note]].copy()
                 
-                # --- VISUALIZAÇÃO EXCLUSIVA DA COLUNA NOTES SOLICITADA ---
+                # Visualização na tela contendo apenas a coluna de notas limpa, sem index numérico extra
                 df_geral_view = df_pos[[col_note]].rename(columns={col_note: 'Notas (Lista Geral)'}).reset_index(drop=True)
                 df_volumosos_view = df_pos[df_pos['Possui_Volumoso'] == True][[col_note]].rename(columns={col_note: 'Notas (Volumosos)'}).reset_index(drop=True)
                 df_comuns_view = df_pos[df_pos['Possui_Volumoso'] == False][[col_note]].rename(columns={col_note: 'Notas (Comuns)'}).reset_index(drop=True)
@@ -358,22 +361,17 @@ with tab2:
                     st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_comuns_view, use_container_width=True, hide_index=True)
                 
-                # --- BOX COPIÁVEL PARA WHATSAPP ---
+                # --- BOX COPIÁVEL TOTALMENTE LIMPO PARA WHATSAPP ---
                 st.markdown("---")
                 st.markdown("### 💬 Copiar Lista Geral para o WhatsApp")
-                st.caption("Clique no botão no canto superior direito da caixa abaixo para copiar toda a lista limpa de uma vez.")
+                st.caption("Clique no botão no canto superior direito do bloco cinza para copiar o texto limpo.")
                 
-                # Transforma a coluna de notas em texto linha por linha para colagem limpa
-                linhas_whatsapp = []
-                for idx, nota in enumerate(df_pos[col_note].tolist(), 1):
-                    # Remove o ponto e vírgula final se houver na nota do Circuit para o texto ficar mais limpo
-                    nota_limpa = str(nota).rstrip(';')
-                    linhas_whatsapp.append(f"{idx}. {nota_limpa}")
-                
+                # Gera as linhas sem o enumerador 'idx.' do laço do python. Mostra puramente a string original
+                linhas_whatsapp = [str(nota) for nota in df_pos[col_note].tolist() if str(nota).strip() != ""]
                 texto_whatsapp_completo = "\n".join(linhas_whatsapp)
                 
                 st.text_area(
-                    label="Texto formatado pronto para envio:",
+                    label="Texto limpo pronto para envio (sem numeração extra):",
                     value=texto_whatsapp_completo,
                     height=250
                 )

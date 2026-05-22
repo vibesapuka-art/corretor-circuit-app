@@ -179,39 +179,6 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     return df_circuit, corrected_addresses 
 
 # ===============================================
-# FUNÇÃO DE SPLIT DE ROTAS
-# ===============================================
-def split_dataframe_for_drivers(df_circuit, num_motoristas):
-    if df_circuit is None or df_circuit.empty:
-        return {}
-    
-    df_export = df_circuit.copy()
-    total_paradas = len(df_export)
-    
-    if num_motoristas <= 0:
-        return {} 
-    
-    paradas_base = total_paradas // num_motoristas
-    restante = total_paradas % num_motoristas
-    rotas_divididas = {}
-    start_index = 0
-    
-    for i in range(num_motoristas):
-        paradas_motorista = paradas_base + (1 if i < restante else 0)
-        end_index = start_index + paradas_motorista
-        
-        df_motorista = df_export.iloc[start_index:end_index].copy()
-        
-        if 'Sequence_Base' in df_motorista.columns:
-            df_motorista = df_motorista.drop(columns=['Sequence_Base'])
-            
-        df_motorista = df_motorista[['Order ID', 'Address', 'Latitude', 'Longitude', 'Notes']]
-        rotas_divididas[f"Motorista {i+1} ({len(df_motorista)} Paradas)"] = df_motorista
-        start_index = end_index
-        
-    return rotas_divididas
-
-# ===============================================
 # INTERFACE PRINCIPAL
 # ===============================================
 conn = get_db_connection()
@@ -313,10 +280,10 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (MAPEAMENTO TOTALMENTE AUTOMÁTICO) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (FIXA E ADAPTADA PARA OS DADOS REAIS DO CIRCUIT) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
-    st.markdown("Insira aqui o arquivo exportado de dentro do Circuit.")
+    st.markdown("Insira aqui o arquivo exportado de dentro do Circuit pós-roteirizado.")
     
     uploaded_file_pos = st.file_uploader("Arraste a planilha que saiu do Circuit:", type=['csv', 'xlsx'], key="file_pos")
     
@@ -327,52 +294,38 @@ with tab2:
             else:
                 df_pos = pd.read_excel(uploaded_file_pos, sheet_name=0)
             
-            # --- DETECTOR INTELIGENTE DE COLUNAS ---
-            col_id = None
-            col_addr = None
-            col_note = None
-            
-            for col in df_pos.columns:
-                col_clean = str(col).strip().lower()
-                # Captura o símbolo '#' ou palavras que representam o ID
-                if col_clean in ['#', 'order id', 'order_id', 'id', 'sequencia', 'sequência']:
-                    col_id = col
-                elif col_clean in ['address', 'destination address', 'endereço', 'endereco', 'rua']:
-                    col_addr = col
-                elif col_clean in ['notes', 'notes_1', 'nota', 'notas', 'observações', 'obs']:
-                    col_note = col
+            # --- MAPEAMENTO FIXO SEGURO BASEADO NOS DADOS REAIS DE EXPORTAÇÃO ---
+            col_addr = next((c for c in df_pos.columns if str(c).strip().lower() == 'address'), None)
+            col_note = next((c for c in df_pos.columns if str(c).strip().lower() == 'notes'), None)
 
-            # Fallbacks automáticos baseados estritamente na ordem física das colunas se os nomes falharem
-            if not col_id and len(df_pos.columns) > 0: col_id = df_pos.columns[0]
-            if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1]
-            if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2]
-
-            if col_id and col_addr:
-                # Normaliza os dados para string para evitar erros de leitura com valores nulos
-                df_pos[col_id] = df_pos[col_id].fillna("").astype(str)
-                df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str)
-                if col_note:
-                    df_pos[col_note] = df_pos[col_note].fillna("").astype(str)
-                else:
-                    df_pos['Notes'] = ""
-                    col_note = 'Notes'
-
-                # Nova regra de limpeza: remove espaços extras e valida se existe '*' em qualquer lugar
-                df_pos['Possui_Volumoso'] = df_pos[col_id].str.replace(" ", "").str.contains(r'\*', regex=True) | df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
+            if col_addr and col_note:
+                # Normaliza e limpa os campos estruturais primordiais
+                df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()
+                df_pos[col_note] = df_pos[col_note].fillna("").astype(str).str.strip()
                 
-                # Formata a visualização final com títulos limpos e organizados
-                df_geral_entrega = df_pos[[col_id, col_addr, col_note]].copy()
-                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][[col_id, col_addr, col_note]].copy()
-                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][[col_id, col_addr, col_note]].copy()
+                # Como a coluna '#' nativa do Circuit vem vazia na exportação de tabelas,
+                # nós criamos a sequência de entrega real baseada na ordem física das linhas geradas pelo Circuit
+                df_pos['Posicao_Entrega'] = range(1, len(df_pos) + 1)
                 
-                st.success(f"🤖 Colunas Identificadas automaticamente: Código/ID -> [{col_id}] | Endereço -> [{col_addr}] | Notas -> [{col_note}]")
+                # Regra Avançada de Filtro: Caça se existe asterisco (*) ignorando espaços na coluna de notas
+                df_pos['Possui_Volumoso'] = df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
                 
-                # Geração dos Painéis lado a lado
+                # Estrutura e limpa as colunas finais que vão aparecer nos relatórios de impressão
+                df_pos = df_pos.rename(columns={'Posicao_Entrega': 'Nº Entrega', col_addr: 'Endereço', col_note: 'Notas/Identificadores'})
+                colunas_saida = ['Nº Entrega', 'Endereço', 'Notas/Identificadores']
+                
+                df_geral_entrega = df_pos[colunas_saida].copy()
+                df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][colunas_saida].copy()
+                df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][colunas_saida].copy()
+                
+                st.success(f"⚡ Rota identificada com sucesso! Total de {len(df_pos)} paradas organizadas.")
+                
+                # Renderização dos Três Painéis Lado a Lado
                 c1, c2, c3 = st.columns(3)
                 
                 with c1:
                     st.markdown("#### 📑 1. Tudo Junto (Romaneio)")
-                    st.caption("Lista Geral unificada na ordem de entrega calculada.")
+                    st.caption("Ordem exata de entrega para controle.")
                     buf_g = io.BytesIO()
                     df_geral_entrega.to_excel(buf_g, index=False)
                     st.download_button("🖨️ Baixar Romaneio Geral", buf_g.getvalue(), "Romaneio_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
@@ -380,7 +333,7 @@ with tab2:
                     
                 with c2:
                     st.markdown("#### ⚠️ 2. Apenas Volumosos")
-                    st.caption("Filtro exclusivo com os pacotes marcados com (*).")
+                    st.caption("Lista de triagem exclusiva para separação de volumosos (*).")
                     buf_v = io.BytesIO()
                     df_volumosos_print.to_excel(buf_v, index=False)
                     st.download_button("🖨️ Baixar Lista Volumosos", buf_v.getvalue(), "Separacao_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
@@ -388,13 +341,13 @@ with tab2:
                     
                 with c3:
                     st.markdown("#### 📦 3. Pacotes Comuns")
-                    st.caption("Filtro contendo apenas mercadorias comuns.")
+                    st.caption("Lista para despacho de pacotes normais/comuns.")
                     buf_c = io.BytesIO()
                     df_comuns_print.to_excel(buf_c, index=False)
                     st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_comuns_print, use_container_width=True)
             else:
-                st.error("Não foi possível processar a estrutura de colunas deste arquivo.")
+                st.error("O arquivo enviado não possui as colunas padrão 'Address' ou 'Notes' geradas pelo Circuit.")
                     
         except Exception as e:
-            st.error(f"Erro no processamento da rota: {e}")
+            st.error(f"Erro ao processar planilha: {e}")

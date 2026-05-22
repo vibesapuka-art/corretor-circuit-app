@@ -280,37 +280,58 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (FIXA E ADAPTADA PARA OS DADOS REAIS DO CIRCUIT) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (COM SELEÇÃO DE TABELA DINÂMICA) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
-    st.markdown("Insira aqui o arquivo exportado de dentro do Circuit pós-roteirizado.")
     
-    uploaded_file_pos = st.file_uploader("Arraste a planilha que saiu do Circuit:", type=['csv', 'xlsx'], key="file_pos")
+    # 1. Upload do Arquivo do Circuit
+    uploaded_file_pos = st.file_uploader("Arraste a planilha/arquivo do Circuit aqui:", type=['csv', 'xlsx'], key="file_pos")
     
     if uploaded_file_pos is not None:
         try:
-            if uploaded_file_pos.name.endswith('.csv'):
-                df_pos = pd.read_csv(uploaded_file_pos)
-            else:
-                df_pos = pd.read_excel(uploaded_file_pos, sheet_name=0)
+            # Identifica todas as abas/tabelas se for um arquivo Excel
+            abas_disponiveis = ["Primeira Tabela / Padrão"]
+            is_excel = uploaded_file_pos.name.endswith('.xlsx')
             
-            # --- MAPEAMENTO FIXO SEGURO BASEADO NOS DADOS REAIS DE EXPORTAÇÃO ---
+            if is_excel:
+                xl = pd.ExcelFile(uploaded_file_pos)
+                if len(xl.sheet_names) > 1:
+                    abas_disponiveis = xl.sheet_names
+
+            # 2. SELETOR DE TABELA DINÂMICA (Opção para escolher qual Table pesquisar)
+            st.markdown("### 🔍 Configuração da Aba do Arquivo")
+            tabela_selecionada = st.selectbox(
+                "Selecione qual Tabela/Aba contém os dados de entrega (onde fica a coluna Notes na coluna C):",
+                options=abas_disponiveis,
+                index=1 if len(abas_disponiveis) > 1 else 0 # Deixa pré-selecionada a Table 2 se houver
+            )
+            
+            # Carrega a tabela escolhida pelo usuário
+            if is_excel:
+                sheet_to_load = tabela_selecionada if tabela_selecionada != "Primeira Tabela / Padrão" else 0
+                df_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_to_load)
+            else:
+                df_pos = pd.read_csv(uploaded_file_pos)
+            
+            # --- PROCESSAMENTO SEGURO DA COLUNA C ('Notes') ---
             col_addr = next((c for c in df_pos.columns if str(c).strip().lower() == 'address'), None)
             col_note = next((c for c in df_pos.columns if str(c).strip().lower() == 'notes'), None)
 
+            # Fallback robusto caso as colunas venham sem nome na tabela selecionada
+            if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1] # Coluna B
+            if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2] # Coluna C
+
             if col_addr and col_note:
-                # Normaliza e limpa os campos estruturais primordiais
                 df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()
                 df_pos[col_note] = df_pos[col_note].fillna("").astype(str).str.strip()
                 
-                # Como a coluna '#' nativa do Circuit vem vazia na exportação de tabelas,
-                # nós criamos a sequência de entrega real baseada na ordem física das linhas geradas pelo Circuit
+                # Gera a numeração sequencial correta baseada na ordem das linhas da tabela lida
                 df_pos['Posicao_Entrega'] = range(1, len(df_pos) + 1)
                 
-                # Regra Avançada de Filtro: Caça se existe asterisco (*) ignorando espaços na coluna de notas
+                # Varre a coluna C procurando o asterisco (*)
                 df_pos['Possui_Volumoso'] = df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
                 
-                # Estrutura e limpa as colunas finais que vão aparecer nos relatórios de impressão
+                # Padroniza nomes para os relatórios finais
                 df_pos = df_pos.rename(columns={'Posicao_Entrega': 'Nº Entrega', col_addr: 'Endereço', col_note: 'Notas/Identificadores'})
                 colunas_saida = ['Nº Entrega', 'Endereço', 'Notas/Identificadores']
                 
@@ -318,14 +339,14 @@ with tab2:
                 df_volumosos_print = df_pos[df_pos['Possui_Volumoso'] == True][colunas_saida].copy()
                 df_comuns_print = df_pos[df_pos['Possui_Volumoso'] == False][colunas_saida].copy()
                 
-                st.success(f"⚡ Rota identificada com sucesso! Total de {len(df_pos)} paradas organizadas.")
+                st.success(f"⚡ Sucesso! Lendo dados da [{tabela_selecionada}]. Total de {len(df_pos)} paradas.")
                 
-                # Renderização dos Três Painéis Lado a Lado
+                # Renderização das Tabelas Lado a Lado
                 c1, c2, c3 = st.columns(3)
                 
                 with c1:
                     st.markdown("#### 📑 1. Tudo Junto (Romaneio)")
-                    st.caption("Ordem exata de entrega para controle.")
+                    st.caption("Ordem unificada gerada pelo Circuit.")
                     buf_g = io.BytesIO()
                     df_geral_entrega.to_excel(buf_g, index=False)
                     st.download_button("🖨️ Baixar Romaneio Geral", buf_g.getvalue(), "Romaneio_GERAL_Rota.xlsx", EXCEL_MIME_TYPE)
@@ -333,7 +354,7 @@ with tab2:
                     
                 with c2:
                     st.markdown("#### ⚠️ 2. Apenas Volumosos")
-                    st.caption("Lista de triagem exclusiva para separação de volumosos (*).")
+                    st.caption("Filtro para separação de cargas com (*).")
                     buf_v = io.BytesIO()
                     df_volumosos_print.to_excel(buf_v, index=False)
                     st.download_button("🖨️ Baixar Lista Volumosos", buf_v.getvalue(), "Separacao_VOLUMOSOS.xlsx", EXCEL_MIME_TYPE)
@@ -341,13 +362,13 @@ with tab2:
                     
                 with c3:
                     st.markdown("#### 📦 3. Pacotes Comuns")
-                    st.caption("Lista para despacho de pacotes normais/comuns.")
+                    st.caption("Lista para esteira padrão sem volumosos.")
                     buf_c = io.BytesIO()
                     df_comuns_print.to_excel(buf_c, index=False)
                     st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_comuns_print, use_container_width=True)
             else:
-                st.error("O arquivo enviado não possui as colunas padrão 'Address' ou 'Notes' geradas pelo Circuit.")
+                st.error("Não encontramos colunas válidas nesta Tabela. Certifique-se de escolher a aba correta.")
                     
         except Exception as e:
-            st.error(f"Erro ao processar planilha: {e}")
+            st.error(f"Erro ao processar a tabela selecionada: {e}")

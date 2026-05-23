@@ -178,6 +178,17 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df_circuit.insert(0, 'Sequence_Base', range(1, len(df_circuit) + 1))
     return df_circuit, corrected_addresses 
 
+# --- Função de apoio para checar se existem pacotes comuns na string de IDs ---
+def verificar_se_possui_comum(nota_string):
+    # Remove a parte de Cidade, CEP, etc., focando apenas nos IDs antes do ponto e vírgula inicial
+    parte_ids = nota_string.split(';')[0]
+    # Quebra por vírgula para avaliar cada ID individualmente
+    ids = [i.strip() for i in parte_ids.split(',')]
+    for id_unico in ids:
+        if id_unico != "" and '*' not in id_unico:
+            return True
+    return False
+
 # ===============================================
 # INTERFACE PRINCIPAL
 # ===============================================
@@ -280,7 +291,7 @@ with tab_split:
                 buffer_individual.seek(0)
                 st.download_button(label=f"⬇️ Baixar {nome_rota}", data=buffer_individual, file_name=f"Rota_{i+1}.xlsx", mime=EXCEL_MIME_TYPE, key=f"dl_m_{i}")
 
-# --- ABA 3: PÓS-ROTEIRIZAÇÃO (LIMPA E COPIÁVEL DE FORMA EXATA) ---
+# --- ABA 3: PÓS-ROTEIRIZAÇÃO (CORRIGIDA: ENTRADA DUPLA PARA MISTOS) ---
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
     
@@ -319,25 +330,29 @@ with tab2:
                 df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()
                 df_pos[col_note] = df_pos[col_note].fillna("").astype(str).str.strip()
                 
-                # Trata as strings de notas limpando espaços duplicados e pontos e vírgulas finais
+                # Trata as strings de notas limpando pontuações e espaços extras
                 df_pos[col_note] = df_pos[col_note].apply(lambda x: re.sub(r';\s*$', '', str(x)).strip())
                 
-                # Varre se possui asterisco para separar volumosos
-                df_pos['Possui_Volumoso'] = df_pos[col_note].str.replace(" ", "").str.contains(r'\*', regex=True)
+                # --- NOVA LÓGICA DE FILTRAGEM MULTI-LISTA (DUPLICADOS SE FOR MISTO) ---
+                # 1. Se tem asterisco (*), vai para a lista de Volumosos
+                df_pos['Possui_Volumoso'] = df_pos[col_note].str.contains(r'\*', regex=True)
                 
-                # Separa os dataframes originais completos (para a exportação em Excel com Endereço)
+                # 2. Se tem algum ID sem asterisco, vai para a lista de Comuns
+                df_pos['Possui_Comum'] = df_pos[col_note].apply(verificar_se_possui_comum)
+                
+                # Separa os dataframes completos para os downloads em Excel (com endereço)
                 df_geral_excel = df_pos[[col_addr, col_note]].copy()
                 df_volumosos_excel = df_pos[df_pos['Possui_Volumoso'] == True][[col_addr, col_note]].copy()
-                df_comuns_excel = df_pos[df_pos['Possui_Volumoso'] == False][[col_addr, col_note]].copy()
+                df_comuns_excel = df_pos[df_pos['Possui_Comum'] == True][[col_addr, col_note]].copy()
                 
-                # Visualização na tela contendo apenas a coluna de notas limpa, sem index numérico extra
+                # Prepara visualização limpa nas tabelas da interface (apenas as notas)
                 df_geral_view = df_pos[[col_note]].rename(columns={col_note: 'Notas (Lista Geral)'}).reset_index(drop=True)
                 df_volumosos_view = df_pos[df_pos['Possui_Volumoso'] == True][[col_note]].rename(columns={col_note: 'Notas (Volumosos)'}).reset_index(drop=True)
-                df_comuns_view = df_pos[df_pos['Possui_Volumoso'] == False][[col_note]].rename(columns={col_note: 'Notas (Comuns)'}).reset_index(drop=True)
+                df_comuns_view = df_pos[df_pos['Possui_Comum'] == True][[col_note]].rename(columns={col_note: 'Notas (Comuns)'}).reset_index(drop=True)
                 
                 st.success(f"⚡ Sucesso! Lendo dados da [{tabela_selecionada}].")
                 
-                # Geração das colunas na tela
+                # Geração das 3 colunas paralelas na tela
                 c1, c2, c3 = st.columns(3)
                 
                 with c1:
@@ -361,12 +376,11 @@ with tab2:
                     st.download_button("🖨️ Baixar Lista Comuns", buf_c.getvalue(), "Separacao_COMUNS.xlsx", EXCEL_MIME_TYPE)
                     st.dataframe(df_comuns_view, use_container_width=True, hide_index=True)
                 
-                # --- BOX COPIÁVEL TOTALMENTE LIMPO PARA WHATSAPP ---
+                # --- BOX COPIÁVEL PARA WHATSAPP ---
                 st.markdown("---")
                 st.markdown("### 💬 Copiar Lista Geral para o WhatsApp")
-                st.caption("Clique no botão no canto superior direito do bloco cinza para copiar o texto limpo.")
+                st.caption("Clique no botão no canto superior direito do bloco cinza para copiar a lista.")
                 
-                # Gera as linhas sem o enumerador 'idx.' do laço do python. Mostra puramente a string original
                 linhas_whatsapp = [str(nota) for nota in df_pos[col_note].tolist() if str(nota).strip() != ""]
                 texto_whatsapp_completo = "\n".join(linhas_whatsapp)
                 

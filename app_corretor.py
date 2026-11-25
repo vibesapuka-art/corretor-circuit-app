@@ -178,6 +178,70 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
     df_circuit.insert(0, 'Sequence_Base', range(1, len(df_circuit) + 1))
     return df_circuit, corrected_addresses 
 
+# Recuperação por ID, sem alterar a ordem da rota otimizada.
+def texto_circuit(v):
+    if pd.isna(v):
+        return ''
+    return re.sub(r'(?<=\d)\.0$', '', str(v).strip())
+
+def chave_ids(v):
+    ids = [texto_circuit(i).replace('*', '').strip() for i in texto_circuit(v).split(';')[0].split(',')]
+    return tuple(sorted(i for i in ids if i))
+
+def achar_coluna(df, nomes):
+    import unicodedata
+    def norm(v):
+        return re.sub(r'[^a-z0-9]', '', unicodedata.normalize('NFKD', str(v).lower()).encode('ascii', 'ignore').decode())
+    return next((c for n in nomes for c in df.columns if norm(c) == norm(n)), None)
+
+def recuperar_rota(df, base):
+    ids = achar_coluna(df, ['Order ID', 'Order IDs', 'ID do pedido', 'ID do Pedido', 'Order number', 'ID'])
+    addr = achar_coluna(df, ['Address', 'Endereço', 'Destination Address', 'Stop Address', 'Endereço Original'])
+    notes = achar_coluna(df, ['Notes', 'Nota', 'Notas', 'Observações', 'Delivery Notes', 'Stop Notes'])
+    if ids is None and notes is None:
+        raise ValueError('Não encontrei Order ID nem Notes na aba escolhida.')
+    lookup = {}
+    if base is not None:
+        for c in ['Order ID', 'Address', 'Notes']:
+            if c not in base.columns:
+                raise ValueError('A referência deve ser a planilha original enviada ao Circuit, com Order ID, Address e Notes.')
+        for _, r in base.iterrows():
+            k = chave_ids(r['Order ID'])
+            if k:
+                if k in lookup:
+                    lookup[k].append(r)
+                    continue
+                lookup[k] = [r]
+    rows, faltas = [], []
+    for _, r in df.iterrows():
+        oid = texto_circuit(r[ids]) if ids is not None else ''
+        nota = texto_circuit(r[notes]) if notes is not None else ''
+        endereco = texto_circuit(r[addr]) if addr is not None else ''
+        if not (oid or nota or endereco):
+            continue
+        k = chave_ids(oid or nota)
+        if nota.lower().strip('; ') in {'destino', 'destination', 'origin', 'origem'}:
+            continue
+        candidatos = lookup.get(k, [])
+        original = candidatos[0] if len(candidatos) == 1 else None
+        if len(candidatos) > 1 and endereco:
+            matches = [c for c in candidatos if texto_circuit(c['Address']).casefold() == endereco.casefold()]
+            if len(matches) == 1:
+                original = matches[0]
+        if not nota and oid:
+            nota = oid
+        if original is not None:
+            endereco = texto_circuit(original['Address']) or endereco
+            nota = texto_circuit(original['Notes']) or nota
+        if not endereco or not nota:
+            faltas.append(oid or nota or f'linha {len(rows)+1}')
+        rows.append({'Address': endereco, 'Notes': nota})
+    if faltas:
+        raise ValueError('Endereço ou notas não recuperados para: ' + ', '.join(faltas[:15]) + '. Confira a aba e envie a referência da mesma rota.')
+    if not rows:
+        raise ValueError('Nenhuma parada encontrada na aba escolhida.')
+    return pd.DataFrame(rows)
+
 # --- Função de apoio para checar se existem pacotes comuns na string de IDs ---
 def verificar_se_possui_comum(nota_string):
     # Remove a parte de Cidade, CEP, etc., focando apenas nos IDs antes do ponto e vírgula inicial
@@ -295,6 +359,9 @@ with tab_split:
 with tab2:
     st.header("📋 Passo Final: Impressão e Triagem Física no Galpão")
     
+    st.caption("Use a planilha original da mesma rota para recuperar Address e Notes pelo Order ID. Se acabou de gerar a rota nesta sessão, ela já está disponível.")
+    referencia = st.file_uploader("Planilha original enviada ao Circuit (referência)", type=['xlsx', 'csv'], key='referencia_pos')
+    usar_sessao = st.checkbox("Usar a referência gerada nesta sessão (somente se for a mesma rota)", value=False, key="usar_ref_sessao")
     uploaded_file_pos = st.file_uploader("Arraste a planilha/arquivo do Circuit aqui:", type=['csv', 'xlsx'], key="file_pos")
     
     if uploaded_file_pos is not None:
@@ -306,25 +373,28 @@ with tab2:
                 xl = pd.ExcelFile(uploaded_file_pos)
                 if len(xl.sheet_names) > 1:
                     abas_disponiveis = xl.sheet_names
+                aba_padrao = next((i for i, nome in enumerate(xl.sheet_names) if achar_coluna(pd.read_excel(xl, sheet_name=nome, nrows=0), ['Address', 'Destination Address', 'Endereço']) is not None or achar_coluna(pd.read_excel(xl, sheet_name=nome, nrows=0), ['Order ID', 'Notes']) is not None), 0)
 
             st.markdown("### 🔍 Configuração da Aba do Arquivo")
             tabela_selecionada = st.selectbox(
-                "Selecione qual Tabela/Aba contém os dados de entrega (onde fica a coluna Notes na coluna C):",
+                "Selecione qual Tabela/Aba contém os dados de entrega (com as paradas na ordem otimizada):",
                 options=abas_disponiveis,
-                index=1 if len(abas_disponiveis) > 1 else 0
+                index=aba_padrao if len(abas_disponiveis) > 1 else 0
             )
             
             if is_excel:
                 sheet_to_load = tabela_selecionada if tabela_selecionada != "Primeira Tabela / Padrão" else 0
-                df_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_to_load)
+                df_pos = pd.read_excel(uploaded_file_pos, sheet_name=sheet_to_load, dtype=str)
             else:
-                df_pos = pd.read_csv(uploaded_file_pos)
+                df_pos = pd.read_csv(uploaded_file_pos, dtype=str)
             
-            col_addr = next((c for c in df_pos.columns if str(c).strip().lower() == 'address'), None)
-            col_note = next((c for c in df_pos.columns if str(c).strip().lower() == 'notes'), None)
-
-            if not col_addr and len(df_pos.columns) > 1: col_addr = df_pos.columns[1]
-            if not col_note and len(df_pos.columns) > 2: col_note = df_pos.columns[2]
+            base = st.session_state.get('df_circuit_agrupado_pre') if usar_sessao else None
+            if referencia is not None:
+                base = pd.read_csv(referencia, dtype=str) if referencia.name.lower().endswith('.csv') else pd.read_excel(referencia, dtype=str)
+            if base is not None:
+                st.info('Referência de endereços ativa. Confira se pertence à mesma rota.')
+            df_pos = recuperar_rota(df_pos, base)
+            col_addr, col_note = 'Address', 'Notes'
 
             if col_addr and col_note:
                 df_pos[col_addr] = df_pos[col_addr].fillna("").astype(str).str.strip()

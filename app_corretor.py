@@ -175,6 +175,8 @@ def processar_e_corrigir_dados(df_entrada, limite_similaridade, df_cache_geoloc)
         'Notes': notas_completas
     }) 
     
+    # Cópia do endereço como campo adicional selecionável no Circuit/Spoke.
+    df_circuit['Endereço Original'] = df_circuit['Address']
     df_circuit.insert(0, 'Sequence_Base', range(1, len(df_circuit) + 1))
     return df_circuit, corrected_addresses 
 
